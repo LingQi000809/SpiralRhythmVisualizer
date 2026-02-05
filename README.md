@@ -1,6 +1,6 @@
 # Backend
 
-## libraries
+## Install libraries
 I'm using arm64 python3.12.10.
 
 ```
@@ -22,7 +22,13 @@ python3 -m uvicorn audio_analysis:app --reload
 # Frontend
 Using vite for ReactJS.
 
-## libraries
+## Install libraries
 ```
 npm install axios
+```
+
+## Spin up frontend
+
+```
+npm run dev
 ```

@@ -1,6 +1,6 @@
 import React, { useRef, useState } from "react";
 import AudioUploader from "./components/AudioUploader";
-import RadialRhythmVisualizer from "./components/RadialRhythmVisualizer";
+import SpiralRhythmVisualizer from "./components/SpiralRhythmVisualizer";
 
 export default function App() {
   const audioRef = useRef(null);
