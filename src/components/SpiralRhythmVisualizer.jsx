@@ -8,6 +8,50 @@ function getClusterColor(clusterIndex) {
   return `hsl(${hue}, ${saturation}%, ${lightness}%)`;
 }
 
+function summarizeClusters(onsets) {
+  const clusters = {};
+
+  onsets.forEach(o => {
+    if (!clusters[o.cluster]) {
+      clusters[o.cluster] = {
+        centroidSum: 0,
+        count: 0,
+      };
+    }
+    clusters[o.cluster].centroidSum += o.centroid;
+    clusters[o.cluster].count += 1;
+  });
+
+  return Object.entries(clusters).map(([cluster, v]) => ({
+    cluster: Number(cluster),
+    meanCentroid: v.centroidSum / v.count,
+  }));
+}
+
+function describeClusters(clusterStats) {
+  // rank by brightness (centroid)
+  const sorted = [...clusterStats].sort(
+    (a, b) => a.meanCentroid - b.meanCentroid
+  );
+
+  return sorted.map((c, i) => {
+    const p = i / (sorted.length - 1 || 1);
+
+    let brightness;
+    if (p < 0.2) brightness = "dark";
+    else if (p < 0.4) brightness = "warm";
+    else if (p < 0.6) brightness = "neutral";
+    else if (p < 0.8) brightness = "bright";
+    else brightness = "sharp";
+
+    return {
+      cluster: c.cluster,
+      description: brightness,
+    };
+  });
+}
+
+
 export default function SpiralRhythmVisualizer({ audioRef, rhythmData }) {
   const canvasRef = useRef(null);
   const rafRef = useRef(null);
@@ -28,6 +72,12 @@ export default function SpiralRhythmVisualizer({ audioRef, rhythmData }) {
     resize();
     window.addEventListener("resize", resize);
 
+    const clusterStats = summarizeClusters(rhythmData.onsets);
+    const clusterDescriptions = describeClusters(clusterStats).sort(
+      (a, b) => a.cluster - b.cluster
+    );
+
+
     function draw() {
       const audio = audioRef.current;
       if (!audio.duration) {
@@ -43,9 +93,11 @@ export default function SpiralRhythmVisualizer({ audioRef, rhythmData }) {
       ) + 1; // cluster indices start at 0
 
 
-      ctx.clearRect(0, 0, canvas.clientWidth, canvas.clientHeight);
       const w = canvas.clientWidth;
       const h = canvas.clientHeight;
+
+      ctx.clearRect(0, 0, w, h);
+
       const cx = w / 2;
       const cy = h / 2;
 
@@ -59,16 +111,17 @@ export default function SpiralRhythmVisualizer({ audioRef, rhythmData }) {
       const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, maxRadius);
       grad.addColorStop(0, "rgba(255,255,255,0.04)");
       grad.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.globalCompositeOperation = "source-over";
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, w, h);
 
       // show glowing pulses as audio plays
       rhythmData.onsets.forEach((onset) => {
         const dt = t - onset.time;
-        if (dt < -0.1 || dt > 1.5) return;
 
         const orbitProgress =
           (onset.time % secondsPerOrbit) / secondsPerOrbit;
+        const orbitCount = Math.floor(onset.time / secondsPerOrbit);
         const angle = orbitProgress * Math.PI * 2 - Math.PI / 2;
 
         const clusterOffset = (onset.cluster / numClusters); // 0 -> 1
@@ -82,17 +135,29 @@ export default function SpiralRhythmVisualizer({ audioRef, rhythmData }) {
         const x = cx + Math.cos(angle) * r;
         const y = cy + Math.sin(angle) * r;
 
-        const life = Math.max(0, 1 - dt / 1.2);
+        let life;
+        if (dt < 0) {
+          life = 0;
+        } else if (dt < 1.2) {
+          life = 1 - dt / 1.2; // current pulse
+        } else {
+          // temporal trace floor decays per orbit
+          life = 0.05 * Math.pow(0.5, orbitCount); // halves the alpha every full rotation
+        }
+
+
         const size = 2 + centroidNorm * 5;
         const glow = 10 + centroidNorm * 15;
+        const clusterColor = getClusterColor(onset.cluster);
 
         // color
-        const clusterColor = getClusterColor(onset.cluster);
-        ctx.beginPath();
-        ctx.fillStyle = clusterColor;
-        ctx.globalAlpha = life;
-        ctx.arc(x, y, size, 0, Math.PI * 2);
-        ctx.fill();
+        if (dt >= 0 && dt < 1.2) {
+          ctx.globalAlpha = life;
+          ctx.fillStyle = clusterColor;
+          ctx.beginPath();
+          ctx.arc(x, y, size, 0, Math.PI * 2);
+          ctx.fill();
+        }     
 
         // glow
         ctx.beginPath();
@@ -101,6 +166,48 @@ export default function SpiralRhythmVisualizer({ audioRef, rhythmData }) {
         ctx.arc(x, y, glow, 0, Math.PI * 2);
         ctx.fill();
       });
+
+      // ---------- LEGEND ----------
+      const padding = 12;
+      const lineHeight = 22;
+      const startX = padding;
+
+      const headerHeight = 22;
+      const startY = padding + headerHeight;
+
+      // explanatory line
+      ctx.globalAlpha = 0.9;
+      ctx.font = "14px system-ui, sans-serif";
+      ctx.textBaseline = "middle";
+      ctx.fillStyle = "rgba(255,255,255,0.85)";
+      ctx.fillText(
+        "Colors = similar sound textures",
+        startX,
+        padding + 6
+      );
+
+      // legend items
+      ctx.globalAlpha = 0.9;
+      ctx.font = "14px system-ui, sans-serif";
+
+      clusterDescriptions.forEach((d, i) => {
+        const y = startY + i * lineHeight;
+
+        // color dot
+        ctx.fillStyle = getClusterColor(d.cluster);
+        ctx.beginPath();
+        ctx.arc(startX + 4, y + 6, 4, 0, Math.PI * 2);
+        ctx.fill();
+
+        // text
+        ctx.fillStyle = "rgba(255,255,255,0.85)";
+        ctx.fillText(
+          `${d.description}`,
+          startX + 14,
+          y + 6
+        );
+      });
+
 
       ctx.globalAlpha = 1;
       rafRef.current = requestAnimationFrame(draw);

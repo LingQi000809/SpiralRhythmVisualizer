@@ -13,7 +13,7 @@ pip install -r requirements.txt
 pip freeze > requirements.txt
 ```
 
-## Spin up backend
+## Run backend
 
 ```
 python3 -m uvicorn audio_analysis:app --reload
@@ -27,7 +27,7 @@ Using vite for ReactJS.
 npm install axios
 ```
 
-## Spin up frontend
+## Run frontend
 
 ```
 npm run dev

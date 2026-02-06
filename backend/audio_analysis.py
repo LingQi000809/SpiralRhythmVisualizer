@@ -26,8 +26,11 @@ app.add_middleware(
 
 
 @app.post("/process-audio")
-async def process_audio(file: UploadFile = File(...)):
+async def process_audio(file: UploadFile = File(...), n_clusters: int = 4):
     try:
+
+        print(f"n_clusters: {n_clusters}")
+
         # --- Load audio ---
         contents = await file.read()
         audio, sr = librosa.load(io.BytesIO(contents), sr=None, mono=True)
@@ -81,7 +84,7 @@ async def process_audio(file: UploadFile = File(...)):
         feature_vectors = np.array(feature_vectors)
 
         # --- Timbre clustering ---
-        n_clusters = min(4, len(feature_vectors))
+        n_clusters = min(n_clusters, len(feature_vectors))
         kmeans = KMeans(n_clusters=n_clusters, random_state=0, n_init=10)
         labels = kmeans.fit_predict(feature_vectors)
 

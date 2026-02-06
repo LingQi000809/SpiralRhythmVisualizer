@@ -1,26 +1,16 @@
 import React, { useState } from "react";
-import axios from "axios";
 
-export default function AudioUploader({ onAudioData, audioRef }) {
-  const [audioUrl, setAudioUrl] = useState(null);
+export default function AudioUploader({ onFileSelect, audioRef }) {
   const [dragActive, setDragActive] = useState(false);
+  const [audioUrl, setAudioUrl] = useState(null);
 
-  const handleFileUpload = async (file) => {
+  const handleFileUpload = (file) => {
     if (!file) return;
-
     const url = URL.createObjectURL(file);
     setAudioUrl(url);
 
-    const formData = new FormData();
-    formData.append("file", file);
-
-    const res = await axios.post(
-      "http://127.0.0.1:8000/process-audio",
-      formData,
-      { headers: { "Content-Type": "multipart/form-data" } }
-    );
-
-    onAudioData?.(res.data);
+    // notify parent about the selected file
+    onFileSelect?.(file, url);
   };
 
   return (
@@ -44,9 +34,10 @@ export default function AudioUploader({ onAudioData, audioRef }) {
           textAlign: "center",
           marginBottom: "1rem",
           background: dragActive ? "#141a26" : "#0b0e14",
+          cursor: "pointer",
         }}
       >
-        Drop audio here or click to upload! 
+        Drop audio here or click to upload!
         <input
           type="file"
           accept=".wav,.mp3"
@@ -54,20 +45,13 @@ export default function AudioUploader({ onAudioData, audioRef }) {
           style={{ display: "none" }}
           id="file-input"
         />
-        <label htmlFor="file-input" style={{ cursor: "pointer", color: "#8ecae6" }}>
-          &nbsp;&nbsp;Browse
+        <label
+          htmlFor="file-input"
+          style={{ cursor: "pointer", color: "#8ecae6", marginLeft: "8px" }}
+        >
+          Browse
         </label>
       </div>
-
-      {/* Audio Player */}
-      {audioUrl && (
-        <audio
-          ref={audioRef}
-          src={audioUrl}
-          controls
-          style={{ width: "100%" }}
-        />
-      )}
     </div>
   );
 }
