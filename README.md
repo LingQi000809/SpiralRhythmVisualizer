@@ -13,6 +13,9 @@ pip install -r requirements.txt
 pip freeze > requirements.txt
 ```
 
+```
+brew install ffmpeg
+```
 ## Run backend
 
 ```

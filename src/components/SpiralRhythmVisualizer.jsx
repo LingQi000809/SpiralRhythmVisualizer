@@ -142,7 +142,7 @@ export default function SpiralRhythmVisualizer({ audioRef, rhythmData }) {
           life = 1 - dt / 1.2; // current pulse
         } else {
           // temporal trace floor decays per orbit
-          life = 0.05 * Math.pow(0.5, orbitCount); // halves the alpha every full rotation
+          life = 0.1 * Math.pow(0.5, orbitCount); // halves the alpha every full rotation
         }
 
 
