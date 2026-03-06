@@ -1,30 +1,17 @@
 import { useState, useRef, useEffect } from "react";
 import VoiceRecorder from "./components/VoiceRecorder";
-import MonoVisualizer from "./components/MonoVisualizer";
+import {VisualizationWaitingView} from "./components/VisualizationWaitingView";
 
 export default function App() {
   const audioRef = useRef(null);
 
   const [audioURL, setAudioURL] = useState(null);
-  const [analysisData, setAnalysisData] = useState(null);
   const [isRecording, setIsRecording] = useState(false);
 
   async function handleRecordingComplete(blob) {
     setIsRecording(false);
     const url = URL.createObjectURL(blob);
     setAudioURL(url);
-
-    // Send to backend for feature extraction
-    const formData = new FormData();
-    formData.append("file", blob, "voice.webm");
-
-    const res = await fetch("http://localhost:8000/analyze", {
-      method: "POST",
-      body: formData,
-    });
-
-    const data = await res.json();
-    setAnalysisData(data);
   }
 
   return (
@@ -53,11 +40,12 @@ export default function App() {
         />
       )}
 
-      {!isRecording && analysisData && (
+      {!isRecording && (
         <div style={{ width: "100%", height: "70vh" }}>
-          <MonoVisualizer
+          <VisualizationWaitingView
+            audioUrl={audioURL}
             audioRef={audioRef}
-            data={analysisData}
+            isVisible={!isRecording && audioURL}
           />
         </div>
       )}
