@@ -12,6 +12,7 @@
   "dependencies": {
     "@tonejs/midi": "^2.0.28",
     "meyda": "^5.6.3",
+    "midi-player-js": "^2.0.17",
     "ml-kmeans": "^7.0.0",
     "pitchfinder": "^2.3.4",
     "pitchy": "^4.1.0",
