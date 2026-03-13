@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import Meyda from "meyda";
 import { PitchDetector } from "pitchy";
+import { Essentia } from 'essentia.js';
+import { EssentiaWASM } from 'essentia.js/dist/essentia-wasm.es.js'
 
 export interface FrameFeatures {
   time: number;        // seconds
@@ -9,6 +11,13 @@ export interface FrameFeatures {
   rms: number;         // 0-1 normalized
   centroid: number;    // 0-1 normalized
   flux?: number;
+}
+
+interface AnalysisLabels {
+  chord: string;
+  mood: string;
+  genre: string;
+  voice: string;
 }
 
 interface VisualizationWaitingViewProps {
@@ -75,128 +84,166 @@ export function VisualizationWaitingView({
 }: VisualizationWaitingViewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const featuresRef = useRef<FrameFeatures[]>([]);
+  const chordTimelineRef = useRef<{time: number, chord: string}[]>([]);
   const durationRef = useRef<number>(0);
-  const audioContextRef = useRef<AudioContext | null>(null);
   const rafRef = useRef<number | null>(null);
+  const currentLabelsRef = useRef<AnalysisLabels>({
+    chord: "", mood: "Analyzing...", genre: "Analyzing...", voice: "Analyzing..."
+  });
+  const [displayLabels, setDisplayLabels] = useState<AnalysisLabels>(currentLabelsRef.current);
 
-  // Process audio and extract features
+  // Add a locking ref to prevent double execution
+  const analysisStartedRef = useRef(false);
+
+  // --- EFFECT 1: OFFLINE ANALYSIS ---
   useEffect(() => {
-    if (!audioUrl) return;
+    if (!audioUrl || !audioRef.current || analysisStartedRef.current) return;
+    analysisStartedRef.current = true;
 
-    const processAudio = async () => {
-      try {
-        console.log('Decoding audio...');
+    const runAnalysis = async () => {
+      // Start total timer
+      const t0 = performance.now();
+
+      // Measure Fetch/Decode
+      const tFetch = performance.now();
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const response = await fetch(audioUrl);
+      const audioBuffer = await audioCtx.decodeAudioData(await response.arrayBuffer());
+      durationRef.current = audioBuffer.duration;
+      const sampleRate = audioBuffer.sampleRate;
+      console.log(`⏱ Decode Time: ${(performance.now() - tFetch).toFixed(2)}ms`);
+
+      // Essentia
+      console.log("Starting Essentia analysis...");
+      const essentia = new Essentia(EssentiaWASM);
+      console.log("Essentia Version:", essentia.version);
+      // Pitch Detector
+      const bufferSize = 2048;
+      const detector = PitchDetector.forFloat32Array(bufferSize);
+      
+      const signal = essentia.audioBufferToMonoSignal(audioBuffer);
+      const frames = essentia.FrameGenerator(signal, 2048, 512);
+      
+      // Arrays to store timing data
+      const times = { pitch: 0, spectral: 0, hpcp: 0 };
+
+      const rawPitch: number[] = [];
+      const rawRms: number[] = [];
+      const rawCentroid: number[] = [];
+      const frameTimes: number[] = [];    
+      const hpcpVectors = new essentia.module.VectorVectorFloat();  
+
+      const loopStart = performance.now();
+      console.log("Analyzing frame-wise spectral features, pitch, rms, and chords");
+      for (let i = 0; i < frames.size(); i++) {
+        const frame = frames.get(i);
+        const time = (i * 512) / sampleRate;
         
-        const response = await fetch(audioUrl);
-        const arrayBuffer = await response.arrayBuffer();
-        
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
-        const audioBuffer = await audioContextRef.current!.decodeAudioData(arrayBuffer);
-        durationRef.current = audioBuffer.duration;
+        // Spectral
+        const ts = performance.now();
+        const spectrum = (essentia.Spectrum(frame) as any).spectrum;
+        const { rms } = essentia.RMS(frame) as any;
+        const { centroid } = essentia.Centroid(spectrum) as any; 
+        times.spectral += (performance.now() - ts);
 
-        console.log('Extracting features...');
+        // Pitch
+        const tp = performance.now();
+        const frameData = essentia.vectorToArray(frame);
+        const [frequency, clarity] = detector.findPitch(frameData, sampleRate);
+        rawPitch.push(frequency && clarity > 0.8 ? (69 + 12 * Math.log2(frequency / 440)) : 0);
+        // Essentia PitchYin takes too long
+        // const { pitch, pitchConfidence } = essentia.PitchYin(frame) as any;      
+        // rawPitch.push(pitchConfidence > 0.8 ? (69 + 12 * Math.log2(pitch / 440)) : 0);
+        times.pitch += (performance.now() - tp);
 
-        const bufferSize = 2048;
-        const hopSize = 512;
-        const channelData = audioBuffer.getChannelData(0);
-        const sampleRate = audioBuffer.sampleRate;
-        Meyda.sampleRate = sampleRate;
-        Meyda.bufferSize = bufferSize;
-
-        // Extract Spectral Features and Pitch
-        const detector = PitchDetector.forFloat32Array(bufferSize);
-
-        const rawRms: number[] = [];
-        const rawCentroid: number[] = [];
-        const rawPitch: number[] = [];
-        const frameTimes: number[] = [];
-
-        for (let i = 0; i < channelData.length - bufferSize; i += hopSize) {
-          const frame = channelData.slice(i, i + bufferSize);
-
-          const f = Meyda.extract(['spectralCentroid', 'rms'], frame);
-          if (!f) continue;
-
-          const time = i / sampleRate;
-          frameTimes.push(time);
-
-          rawRms.push(f.rms || 0);
-          rawCentroid.push(f.spectralCentroid || 0);
-
-          const [frequency, clarity] = detector.findPitch(frame, sampleRate);
-          if (frequency && clarity > 0.8) { // clarity threshold
-            const midi = 69 + 12 * Math.log2(frequency / 440);
-            rawPitch.push(midi);
-          } else {
-            rawPitch.push(0);
-          }
-
-          if (frameTimes.length % 200 === 0) {
-            console.log(
-              `Extracting... ${Math.round((i / channelData.length) * 100)}%`
-            );
-            await new Promise(r => setTimeout(r, 0));
-          }
-        }
-
-        const normRms = normalizeFeatureArr(rawRms);
-        const normCentroid = normalizeFeatureArr(rawCentroid);
-        
-        const features: FrameFeatures[] = [];
-
-        // Compute Note Duration
-
-        let noteStartIdx = 0;
-        const pitchThreshold = 0.5; // MIDI tolerance
-        for (let i = 1; i < rawPitch.length; i++) {
-          const pitchChange =
-            Math.abs(rawPitch[i] - rawPitch[noteStartIdx]) > pitchThreshold;
-
-          if (pitchChange || i === rawPitch.length - 1) {
-            const startTime = frameTimes[noteStartIdx];
-            const endTime = frameTimes[i];
-            const duration = endTime - startTime;
-
-            features.push({
-              time: startTime,
-              duration,
-              pitch: rawPitch[noteStartIdx],
-              rms: normRms[noteStartIdx],
-              centroid: normCentroid[noteStartIdx],
-            });
-
-            noteStartIdx = i;
-          }
-        }
-        
-        featuresRef.current = features;
-        console.table(features);
-        console.log('Ready');
-      } catch (error) {
-        console.error('Error processing audio:', error);
+        // HPCP (chord)
+        const th = performance.now();
+        const peaks = essentia.SpectralPeaks(spectrum) as any;
+        const hpcp = (essentia.HPCP(peaks.frequencies, peaks.magnitudes) as any).hpcp;
+        hpcpVectors.push_back(hpcp);
+        times.hpcp += (performance.now() - th);
+        rawRms.push(rms);
+        rawCentroid.push(centroid);
+        frameTimes.push(time);
       }
+      const normRms = normalizeFeatureArr(rawRms);
+      const normCentroid = normalizeFeatureArr(rawCentroid);
+
+      console.log(`⏱ Total Frame Analysis Time: ${(performance.now() - loopStart).toFixed(2)}ms; Number of frames = ${frames.size()}`);
+      console.log(`   - Spectral Avg: ${(times.spectral / frames.size()).toFixed(4)}ms/frame`);
+      console.log(`   - Pitch Avg: ${(times.pitch / frames.size()).toFixed(4)}ms/frame`);
+      console.log(`   - HPCP Avg: ${(times.hpcp / frames.size()).toFixed(4)}ms/frame`);
+
+      // --- Chord Estimation ---
+      const tc = performance.now();
+      const chordsVector = (essentia.ChordsDetection(hpcpVectors) as any).chords;
+      console.log(`⏱ Chord Estimation: ${(performance.now() - tc).toFixed(2)}ms`);
+      const chordsArray = (essentia as any).vectorToArray(chordsVector) as string[];
+
+      const offlineChords: {time: number, chord: string}[] = [];
+
+      for (let i = 0; i < chordsArray.length; i++) {
+        let currentChord = chordsArray[i];
+        if (!currentChord || currentChord === "NaN") {
+          currentChord = "";
+        }
+        const lastChord = offlineChords[offlineChords.length - 1]?.chord;
+
+        // Only push if the chord changed to keep the timeline clean
+        if (currentChord !== lastChord) {
+          offlineChords.push({
+            time: frameTimes[i],
+            chord: currentChord
+          });
+        }
+      }
+      chordTimelineRef.current = offlineChords;
+      console.table(chordTimelineRef.current);
+
+      // --- Group features into notes ---
+      console.log("Grouping features per note");
+      const features: FrameFeatures[] = [];
+      let noteStartIdx = 0;
+      for (let i = 1; i < rawPitch.length; i++) {
+        if (Math.abs(rawPitch[i] - rawPitch[noteStartIdx]) > 0.5 || i === rawPitch.length - 1) {
+          features.push({
+            time: frameTimes[noteStartIdx],
+            duration: frameTimes[i] - frameTimes[noteStartIdx],
+            pitch: rawPitch[noteStartIdx],
+            rms: normRms[noteStartIdx],
+            centroid: normCentroid[noteStartIdx]
+          });
+          noteStartIdx = i;
+        }
+      }
+      featuresRef.current = features;
+      console.table(features);
+      
+      // --- Classification ML ---
+      // TODO: classification ML
+      // const voiceData = essentia.VoiceInstrumental(signal);
+      // const newLabels = {
+      //   ...currentLabelsRef.current,
+      //   voice: voiceData.isVoice ? "Vocal" : "Instrumental",
+      //   genre: "Detecting...", // Requires further ML models
+      //   mood: "Detecting..." 
+      // };
+      // currentLabelsRef.current = newLabels;
+      // setDisplayLabels(newLabels);
+      console.log(`🏁 TOTAL ANALYSIS TIME: ${(performance.now() - t0).toFixed(2)}ms`);
+      console.log("Analysis complete.");
     };
 
-    processAudio();
-    
-    return () => {
-      // Cleanup AudioContext when audioUrl changes or component unmounts
-      if (audioContextRef.current) {
-        audioContextRef.current.close();
-        audioContextRef.current = null;
-      }
-    };
+    runAnalysis();
   }, [audioUrl]);
 
+  // --- EFFECT 2: RENDER LOOP ---
+  useEffect(() => {
+    if (!isVisible || !canvasRef.current) return;
+    const canvas = canvasRef.current;
+    const ctx = canvas.getContext("2d")!;
 
-  // Update visualization based on currentTime (works for both playback and seeking)
-  useEffect(()=>{
-    if (!isVisible) return;
-
-    const canvas = canvasRef.current as HTMLCanvasElement;
-    if (!canvas) return;
-    const ctx = canvas.getContext("2d") as CanvasRenderingContext2D;
-
+    // --- Window Resizing Observer ---
     const resize = () => {
       const canvas = canvasRef.current;
       if (!canvas) return;
@@ -217,24 +264,15 @@ export function VisualizationWaitingView({
     });
     observer.observe(canvasRef.current!);
 
-    const minAlpha = 0.02;
-
-    function draw() {
+    // --- Animation Loop ---
+    const draw = () => {
       const audio = audioRef.current;
-      if (!audio) {
+      if (!audio || !featuresRef.current.length) {
         rafRef.current = requestAnimationFrame(draw);
         return;
       }
 
-      const events = featuresRef.current;
-      const totalDuration = durationRef.current;
-      const orbitDuration = Math.min(totalDuration, 10); // seconds per orbit
-
-      if (!events.length || totalDuration === 0) {
-        rafRef.current = requestAnimationFrame(draw);
-        return;
-      }
-
+      const minAlpha = 0.02;
       const t = audio.currentTime;
       const rect = canvas.getBoundingClientRect();
       const w = rect.width;
@@ -242,9 +280,22 @@ export function VisualizationWaitingView({
       const cx = w / 2;
       const cy = h / 2;
       const baseRadius = Math.min(w, h) * 0.3;
+      const totalDuration = durationRef.current;
+      const orbitDuration = Math.min(totalDuration, 10); // seconds per orbit
+
       ctx.clearRect(0, 0, w, h);
 
-      events.forEach((evt, idx) => {
+      // Update Chord Label from pre-calculated timeline
+      const currentChordEntry = [...chordTimelineRef.current]
+        .reverse()
+        .find(entry => entry.time <= t);
+      
+      if (currentChordEntry && currentChordEntry.chord !== currentLabelsRef.current.chord) {
+        currentLabelsRef.current.chord = currentChordEntry.chord;
+        setDisplayLabels(prev => ({ ...prev, chord: currentChordEntry.chord }));
+      }
+
+      featuresRef.current.forEach((evt) => {
         const dt = t - evt.time;
         
         const fadeTime = 0.7 // seconds after note ends and fade
@@ -334,7 +385,6 @@ export function VisualizationWaitingView({
     };
   }, [isVisible]);
 
-
   return (
     <div
       style={{
@@ -354,6 +404,38 @@ export function VisualizationWaitingView({
         ref={canvasRef}
         style={{ width: '100%', height: '100%', maxHeight: '80vh', position: 'relative' }}
       />
+      {/* The Center Chord Label */}
+      <div
+        style={{
+          position: 'absolute',
+          top: '50%',
+          left: '50%',
+          transform: 'translate(-50%, -50%)',
+          pointerEvents: 'none', // Allow clicks to pass through to canvas if needed
+          textAlign: 'center',
+          zIndex: 10,
+        }}
+      >
+        <div
+          style={{
+            color: 'white',
+            fontSize: '2.5rem',
+            fontWeight: 'bold',
+            fontFamily: 'monospace',
+            textShadow: '0 0 20px rgba(255,255,255,0.5), 0 0 10px rgba(0,255,204,0.3)',
+            letterSpacing: '4px',
+            transition: 'all 0.2s ease-out', // Smooth transition when chord changes
+          }}
+        >
+          {displayLabels.chord}
+        </div>
+      </div>
+      {/* HUD for high-level classification */}
+      <div style={{ position: 'absolute', bottom: 24, left: 24, pointerEvents: 'none' }}>
+        <p style={{ color: '#00ffcc', margin: 0, fontSize: '12px' }}>GENRE: {displayLabels.genre}</p>
+        <p style={{ color: '#00ffcc', margin: 0, fontSize: '12px' }}>MOOD: {displayLabels.mood}</p>
+        <p style={{ color: '#00ffcc', margin: 0, fontSize: '12px' }}>TYPE: {displayLabels.voice}</p>
+      </div>
     </div>
   );
 }
