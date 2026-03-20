@@ -3,6 +3,11 @@ import Meyda from "meyda";
 import { PitchDetector } from "pitchy";
 import { Essentia } from 'essentia.js';
 import { EssentiaWASM } from 'essentia.js/dist/essentia-wasm.es.js'
+import { 
+  EssentiaTFInputExtractor, 
+  TensorflowMusiCNN, 
+} from 'essentia.js/dist/essentia.js-model.es.js';
+import * as tf from '@tensorflow/tfjs';
 
 export interface FrameFeatures {
   time: number;        // seconds
@@ -15,9 +20,11 @@ export interface FrameFeatures {
 
 interface AnalysisLabels {
   chord: string;
-  mood: string;
-  genre: string;
-  voice: string;
+
+  topGenres: { label: string; score: number }[];
+  topMoods: { label: string; score: number }[];
+  topInstruments: { label: string; score: number }[];
+  topAll: { label: string; score: number }[];
 }
 
 interface VisualizationWaitingViewProps {
@@ -77,6 +84,162 @@ function drawNote(
   ctx.fill();
 }
 
+
+// Model JSON downloaded from https://essentia.upf.edu/models 
+const modelDir = '/models/mtt-musicnn-1/'; 
+const metadataJson = modelDir + 'meta.json';
+const modelJson = modelDir + 'model.json';
+// From the classes field of metadataJson
+const GENRE_TAGS = new Set([
+  "classical",
+  "techno",
+  "electronic",
+  "rock",
+  "ambient",
+  "indian",
+  "opera",
+  "pop",
+  "classic",
+  "new age",
+  "dance",
+  "weird",
+  "country",
+  "metal",
+]);
+
+const MOOD_TAGS = new Set([
+  "slow",
+  "fast",
+  "beat",
+  "loud",
+  "quiet",
+  "soft",
+  "dance",
+]);
+
+const INSTRUMENT_TAGS = new Set([
+  "guitar",
+  "strings",
+  "drums",
+  "piano",
+  "violin",
+  "vocal",
+  "synth",
+  "female",
+  "male",
+  "singing",
+  "vocals",
+  "no vocals",
+  "harpsichord",
+  "flute",
+  "woman",
+  "male vocal",
+  "no vocal",
+  "sitar",
+  "solo",
+  "man",
+  "choir",
+  "voice",
+  "male voice",
+  "female vocal",
+  "beats",
+  "harp",
+  "cello",
+  "no voice",
+  "female voice",
+  "choral"
+]);
+
+// See tutorial page for the basic workflow: https://mtg.github.io/essentia.js/docs/api/tutorial-3.%20Machine%20learning%20inference%20with%20Essentia.js.html
+// Some of the functions are out-dated. Also check visualization/node_modules/essentia.js/dist/essentia.js-model.es.js for source code.
+const runMLClassification = async (audioBuffer: AudioBuffer) => {
+  // Extract features
+  const inputExtractor = new EssentiaTFInputExtractor(EssentiaWASM, "musicnn", false);
+  const resampledSignal = await inputExtractor.downsampleAudioBuffer(audioBuffer);
+  const inputFeatures = inputExtractor.computeFrameWise(resampledSignal, inputExtractor.frameSize);
+
+  // Initialize the Model
+  const musicnn = new TensorflowMusiCNN(tf, modelJson, true);
+  await (musicnn as any).initialize();
+
+  // Load Model Labels
+  const res = await fetch(metadataJson);
+  const json = await res.json();
+  const labels = json.classes;
+  const numClasses = labels.length;
+
+  // Predict
+  const predictions = await musicnn.predict(inputFeatures, true); // shape: [frames, 50]
+
+  // Process predictions
+  // The model outputs an Array(50) of tag activations for every 3 seconds of audio.
+  // We aggregate scores to get the prediction for the full song.
+  const avgScores = new Array(numClasses).fill(0);
+  // Aggregate
+  for (const frame of predictions) {
+    for (let i = 0; i < numClasses; i++) {
+      avgScores[i] += frame[i];
+    }
+  }
+  for (let i = 0; i < numClasses; i++) {
+    avgScores[i] /= predictions.length;
+  }
+  //  Rank
+  const ranked = avgScores
+    .map((v, i) => ({ label: labels[i], score: v }))
+    .sort((a, b) => b.score - a.score);
+  // --- split categories ---
+  const MIN_CONF = 0.15;
+  const genres = ranked
+    .filter(t => GENRE_TAGS.has(t.label.toLowerCase()) && t.score > MIN_CONF);
+  const moods = ranked
+    .filter(t => MOOD_TAGS.has(t.label.toLowerCase()) && t.score > MIN_CONF);
+  const instruments = ranked
+    .filter(t => INSTRUMENT_TAGS.has(t.label.toLowerCase()) && t.score > MIN_CONF);
+  
+  return {
+      topGenres: genres.length > 3 ? genres.slice(0, 3): genres,
+      topMoods: moods.length > 3 ? moods.slice(0, 3): moods,
+      topInstruments: instruments.length > 3 ? instruments.slice(0, 3): instruments,
+      topAll: ranked.slice(0, 5) // for debug
+    };
+};
+
+const renderTagList = (title: string, items: {label: string; score: number}[], color: string) => (
+  <div style={{ marginBottom: 8 }}>
+    <div style={{ color: color, fontSize: '11px', marginBottom: 4 }}>
+      {title}
+    </div>
+
+    {items.map((item, i) => (
+      <div key={i} style={{ marginBottom: 4 }}>
+        <div style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          fontSize: '11px',
+          color: 'white'
+        }}>
+          <span>{item.label}</span>
+          <span>{item.score.toFixed(2)}</span>
+        </div>
+
+        <div style={{
+          height: 3,
+          background: 'rgba(255,255,255,0.1)',
+          borderRadius: 2,
+          overflow: 'hidden'
+        }}>
+          <div style={{
+            width: `${item.score * 100}%`,
+            height: '100%',
+            background: color
+          }} />
+        </div>
+      </div>
+    ))}
+  </div>
+);
+
 export function VisualizationWaitingView({
   audioUrl,
   audioRef,
@@ -88,7 +251,11 @@ export function VisualizationWaitingView({
   const durationRef = useRef<number>(0);
   const rafRef = useRef<number | null>(null);
   const currentLabelsRef = useRef<AnalysisLabels>({
-    chord: "", mood: "Analyzing...", genre: "Analyzing...", voice: "Analyzing..."
+    chord: "",
+    topGenres: [], 
+    topMoods: [],
+    topInstruments: [],
+    topAll: []
   });
   const [displayLabels, setDisplayLabels] = useState<AnalysisLabels>(currentLabelsRef.current);
 
@@ -158,10 +325,44 @@ export function VisualizationWaitingView({
 
         // HPCP (chord)
         const th = performance.now();
-        const peaks = essentia.SpectralPeaks(spectrum) as any;
-        const hpcp = (essentia.HPCP(peaks.frequencies, peaks.magnitudes) as any).hpcp;
-        hpcpVectors.push_back(hpcp);
+        const peaks = essentia.SpectralPeaks(
+          spectrum,
+          0.00001, // magnitudeThreshold
+          3500, // maxFrequency
+          100, // maxPeaks
+          20, // minFrequency
+          "magnitude", // orderBy
+          sampleRate 
+        ) as any;
+        const whitened = essentia.SpectralWhitening(spectrum, peaks.frequencies, peaks.magnitudes) as any;
+        // console.log("peaks");
+        // console.log(essentia.vectorToArray(peaks.frequencies), essentia.vectorToArray(peaks.magnitudes));
+        const hpcpResult = essentia.HPCP(
+          peaks.frequencies,   // frequencies: VectorFloat
+          whitened.magnitudes,     // magnitudes: VectorFloat
+          false,                // bandPreset: boolean (false = custom range)
+          500,                  // bandSplitFrequency: number
+          8,                    // harmonics: number (number of harmonics to consider)
+          3500,                 // maxFrequency: number
+          false,                // maxShifted: boolean
+          20,                   // minFrequency: number
+          false,                // nonLinear: boolean
+          "unitSum",            // normalized: string
+          440,                  // referenceFrequency: number
+          sampleRate,           // sampleRate: number
+          12,                   // size: number (STRICTLY 12 for ChordsDetection)
+          "cosine",             // weightType: string
+          1.0                   // windowSize: number
+        ) as any;
+
+        // console.log("========HPCP========");
+        // const arr = essentia.vectorToArray(hpcpResult.hpcp);
+        // console.log(arr);
+
+        hpcpVectors.push_back(hpcpResult.hpcp);
+
         times.hpcp += (performance.now() - th);
+
         rawRms.push(rms);
         rawCentroid.push(centroid);
         frameTimes.push(time);
@@ -175,8 +376,24 @@ export function VisualizationWaitingView({
       console.log(`   - HPCP Avg: ${(times.hpcp / frames.size()).toFixed(4)}ms/frame`);
 
       // --- Chord Estimation ---
+      const notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+      const hpcpData = essentia.vectorToArray(hpcpVectors);
+
+      const hpcpFrames: number[][] = [];
+      for (let i = 0; i < hpcpVectors.size(); i++) {
+        const vecFloat = hpcpVectors.get(i);
+        const frameArr = Array.from(essentia.vectorToArray(vecFloat)); // convert to number[]
+        hpcpFrames.push(frameArr);
+      }
+      console.log(hpcpFrames);
+
       const tc = performance.now();
-      const chordsVector = (essentia.ChordsDetection(hpcpVectors) as any).chords;
+      const chordsResult = essentia.ChordsDetection(hpcpVectors);
+      console.log("========CHORD DETECTION========");
+      console.log(chordsResult)
+      const chordsVector = (chordsResult as any).chords;
+      console.log(essentia.vectorToArray(chordsVector));
+
       console.log(`⏱ Chord Estimation: ${(performance.now() - tc).toFixed(2)}ms`);
       const chordsArray = (essentia as any).vectorToArray(chordsVector) as string[];
 
@@ -220,16 +437,23 @@ export function VisualizationWaitingView({
       console.table(features);
       
       // --- Classification ML ---
-      // TODO: classification ML
-      // const voiceData = essentia.VoiceInstrumental(signal);
-      // const newLabels = {
-      //   ...currentLabelsRef.current,
-      //   voice: voiceData.isVoice ? "Vocal" : "Instrumental",
-      //   genre: "Detecting...", // Requires further ML models
-      //   mood: "Detecting..." 
-      // };
-      // currentLabelsRef.current = newLabels;
-      // setDisplayLabels(newLabels);
+      const tMLStart = performance.now();
+      const mlResult = await runMLClassification(audioBuffer);
+      const tMLEnd = performance.now();
+
+      console.log(`⏱ ML Classification Time: ${(tMLEnd - tMLStart).toFixed(2)}ms`);
+
+      const newLabels = {
+        ...currentLabelsRef.current,
+        topGenres: mlResult.topGenres,
+        topMoods: mlResult.topMoods,
+        topInstruments: mlResult.topInstruments,
+        topAll: mlResult.topAll
+      };
+
+      currentLabelsRef.current = newLabels;
+      setDisplayLabels(newLabels);
+
       console.log(`🏁 TOTAL ANALYSIS TIME: ${(performance.now() - t0).toFixed(2)}ms`);
       console.log("Analysis complete.");
     };
@@ -431,10 +655,11 @@ export function VisualizationWaitingView({
         </div>
       </div>
       {/* HUD for high-level classification */}
-      <div style={{ position: 'absolute', bottom: 24, left: 24, pointerEvents: 'none' }}>
-        <p style={{ color: '#00ffcc', margin: 0, fontSize: '12px' }}>GENRE: {displayLabels.genre}</p>
-        <p style={{ color: '#00ffcc', margin: 0, fontSize: '12px' }}>MOOD: {displayLabels.mood}</p>
-        <p style={{ color: '#00ffcc', margin: 0, fontSize: '12px' }}>TYPE: {displayLabels.voice}</p>
+      <div style={{ position: 'absolute', bottom: 24, left: 24, width: 160 }}>
+        {renderTagList("GENRES", displayLabels.topGenres || [], "#00ffcc")}
+        {renderTagList("MOODS", displayLabels.topMoods || [], "#52a9ffff")}
+        {renderTagList("INSTRUMENTS", displayLabels.topInstruments || [], "#9575fdff")}
+        {renderTagList("ALL TAGS", displayLabels.topAll || [], "#ffaa33")}
       </div>
     </div>
   );
