@@ -33,6 +33,15 @@ interface VisualizationWaitingViewProps {
   isVisible?: boolean;
 }
 
+interface ClassificationWindow {
+  startTime: number; // seconds
+  endTime: number;   // seconds
+  topGenres: { label: string; score: number }[];
+  topMoods: { label: string; score: number }[];
+  topInstruments: { label: string; score: number }[];
+  topAll: { label: string; score: number }[];
+}
+
 function normalizeFeatureArr(
   arr: number[],
   pMin = 20,
@@ -151,8 +160,9 @@ const INSTRUMENT_TAGS = new Set([
 ]);
 
 // See tutorial page for the basic workflow: https://mtg.github.io/essentia.js/docs/api/tutorial-3.%20Machine%20learning%20inference%20with%20Essentia.js.html
+// For the list of available models: https://essentia.upf.edu/models/
 // Some of the functions are out-dated. Also check visualization/node_modules/essentia.js/dist/essentia.js-model.es.js for source code.
-const runMLClassification = async (audioBuffer: AudioBuffer) => {
+const runMLClassification = async (audioBuffer: AudioBuffer, windowSec = 3): Promise<ClassificationWindow[]> => {
   // Extract features
   const inputExtractor = new EssentiaTFInputExtractor(EssentiaWASM, "musicnn", false);
   const resampledSignal = await inputExtractor.downsampleAudioBuffer(audioBuffer);
@@ -173,36 +183,43 @@ const runMLClassification = async (audioBuffer: AudioBuffer) => {
 
   // Process predictions
   // The model outputs an Array(50) of tag activations for every 3 seconds of audio.
-  // We aggregate scores to get the prediction for the full song.
-  const avgScores = new Array(numClasses).fill(0);
-  // Aggregate
-  for (const frame of predictions) {
-    for (let i = 0; i < numClasses; i++) {
-      avgScores[i] += frame[i];
-    }
-  }
-  for (let i = 0; i < numClasses; i++) {
-    avgScores[i] /= predictions.length;
-  }
-  //  Rank
-  const ranked = avgScores
-    .map((v, i) => ({ label: labels[i], score: v }))
-    .sort((a, b) => b.score - a.score);
-  // --- split categories ---
-  const MIN_CONF = 0.15;
-  const genres = ranked
-    .filter(t => GENRE_TAGS.has(t.label.toLowerCase()) && t.score > MIN_CONF);
-  const moods = ranked
-    .filter(t => MOOD_TAGS.has(t.label.toLowerCase()) && t.score > MIN_CONF);
-  const instruments = ranked
-    .filter(t => INSTRUMENT_TAGS.has(t.label.toLowerCase()) && t.score > MIN_CONF);
-  
-  return {
+  // We aggregate scores to get time-based prediction.
+  const windows: ClassificationWindow[] = [];
+  const predictionWindowSec = 3; // fixed by the model
+  const predictionsPerWindow = Math.ceil(windowSec / predictionWindowSec);
+
+  for (let wStart = 0; wStart < predictions.length; wStart += predictionsPerWindow) {
+    const windowFrames = predictions.slice(wStart, wStart + predictionsPerWindow);
+    const avgScores: number[] = new Array(numClasses).fill(0);
+
+    windowFrames.forEach((frame: number[]) => {
+      for (let i = 0; i < numClasses; i++) avgScores[i] += frame[i];
+    });
+    for (let i = 0; i < numClasses; i++) avgScores[i] /= windowFrames.length;
+
+    const ranked = avgScores
+      .map((v, i) => ({ label: labels[i], score: v }))
+      .sort((a, b) => b.score - a.score);
+
+    const MIN_CONF = 0.15;
+    const genres = ranked.filter(t => GENRE_TAGS.has(t.label.toLowerCase()) && t.score > MIN_CONF);
+    const moods = ranked.filter(t => MOOD_TAGS.has(t.label.toLowerCase()) && t.score > MIN_CONF);
+    const instruments = ranked.filter(t => INSTRUMENT_TAGS.has(t.label.toLowerCase()) && t.score > MIN_CONF);
+
+    const startTime: number = wStart * predictionWindowSec;
+    const endTime: number = Math.min(audioBuffer.duration, startTime + windowSec);
+
+    windows.push({
+      startTime,
+      endTime,
       topGenres: genres.length > 3 ? genres.slice(0, 3): genres,
       topMoods: moods.length > 3 ? moods.slice(0, 3): moods,
       topInstruments: instruments.length > 3 ? instruments.slice(0, 3): instruments,
-      topAll: ranked.slice(0, 5) // for debug
-    };
+      topAll: ranked.slice(0, 5),
+    });
+  }
+
+  return windows;
 };
 
 const renderTagList = (title: string, items: {label: string; score: number}[], color: string) => (
@@ -257,6 +274,7 @@ export function VisualizationWaitingView({
     topInstruments: [],
     topAll: []
   });
+  const timeBasedLabelsRef = useRef<ClassificationWindow[]>([]);
   const [displayLabels, setDisplayLabels] = useState<AnalysisLabels>(currentLabelsRef.current);
 
   // Add a locking ref to prevent double execution
@@ -438,21 +456,11 @@ export function VisualizationWaitingView({
       
       // --- Classification ML ---
       const tMLStart = performance.now();
-      const mlResult = await runMLClassification(audioBuffer);
+      const mlWindows: ClassificationWindow[] = await runMLClassification(audioBuffer, 3);
+      timeBasedLabelsRef.current = mlWindows;
       const tMLEnd = performance.now();
 
       console.log(`⏱ ML Classification Time: ${(tMLEnd - tMLStart).toFixed(2)}ms`);
-
-      const newLabels = {
-        ...currentLabelsRef.current,
-        topGenres: mlResult.topGenres,
-        topMoods: mlResult.topMoods,
-        topInstruments: mlResult.topInstruments,
-        topAll: mlResult.topAll
-      };
-
-      currentLabelsRef.current = newLabels;
-      setDisplayLabels(newLabels);
 
       console.log(`🏁 TOTAL ANALYSIS TIME: ${(performance.now() - t0).toFixed(2)}ms`);
       console.log("Analysis complete.");
@@ -508,6 +516,22 @@ export function VisualizationWaitingView({
       const orbitDuration = Math.min(totalDuration, 10); // seconds per orbit
 
       ctx.clearRect(0, 0, w, h);
+
+      const currentTime: number = audio.currentTime;
+
+      // Find the current classification window for this time
+      const currentWindow: ClassificationWindow | undefined = timeBasedLabelsRef.current.find(
+        (w: ClassificationWindow) => currentTime >= w.startTime && currentTime < w.endTime
+      );
+      if (currentWindow) {
+        setDisplayLabels(prev => ({
+          ...prev,
+          topGenres: currentWindow.topGenres,
+          topMoods: currentWindow.topMoods,
+          topInstruments: currentWindow.topInstruments,
+          topAll: currentWindow.topAll,
+        }));
+      }
 
       // Update Chord Label from pre-calculated timeline
       const currentChordEntry = [...chordTimelineRef.current]
