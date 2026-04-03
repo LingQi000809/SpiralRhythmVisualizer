@@ -1,76 +1,26 @@
 {
-    "name": "MTT MusiCNN",
-    "type": "auto-tagging",
-    "link": "https://essentia.upf.edu/models/autotagging/mtt/mtt-musicnn-1.pb",
+    "name": "danceability classifier",
+    "type": "multi-class classifier",
+    "link": "https://essentia.upf.edu/models/classifiers/danceability/danceability-musicnn-mtt-2.pb",
     "version": "1",
-    "description": "prediction of the top-50 tags in the dataset",
+    "description": "classification of music by danceability",
     "author": "Pablo Alonso",
     "email": "pablo.alonso@upf.edu",
-    "release_date": "2020-03-31",
+    "release_date": "2020-07-07",
     "framework": "tensorflow",
     "framework_version": "1.15.0",
     "classes": [
-        "guitar",
-        "classical",
-        "slow",
-        "techno",
-        "strings",
-        "drums",
-        "electronic",
-        "rock",
-        "fast",
-        "piano",
-        "ambient",
-        "upbeat",
-        "violin",
-        "vocal",
-        "synth",
-        "female",
-        "indian",
-        "opera",
-        "male",
-        "singing",
-        "vocals",
-        "no vocals",
-        "harpsichord",
-        "loud",
-        "quiet",
-        "flute",
-        "woman",
-        "male vocal",
-        "no vocal",
-        "pop",
-        "soft",
-        "sitar",
-        "solo",
-        "man",
-        "classic",
-        "choir",
-        "voice",
-        "new age",
-        "dance",
-        "male voice",
-        "female vocal",
-        "beats",
-        "harp",
-        "cello",
-        "no voice",
-        "weird",
-        "country",
-        "metal",
-        "female voice",
-        "choral"
+        "danceable",
+        "not_danceable"
     ],
     "model_types": [
         "frozen_model"
     ],
     "dataset": {
-        "name": "The MagnaTagATune dataset",
-        "citation": "http://mirg.city.ac.uk/codeapps/the-magnatagatune-dataset",
-        "size": "20k tracks",
+        "name": "In-house MTG collection",
+        "size": "306 full tracks, 124/182 per class",
         "metrics": {
-            "ROC-AUC": 0.91,
-            "PR-AUC": 0.38
+            "5-fold_cross_validation_normalized_accuracy": 0.91
         }
     },
     "schema": {
@@ -87,20 +37,31 @@
                 "type": "float",
                 "shape": [
                     1,
-                    50
+                    2
                 ],
                 "op": "Sigmoid",
                 "output_purpose": "predictions"
+            },
+            {
+                "name": "model/dense_2/BiasAdd",
+                "type": "float",
+                "shape": [
+                    1,
+                    2
+                ],
+                "op": "fully connected",
+                "description": "logits",
+                "output_purpose": ""
             },
             {
                 "name": "model/dense_1/BiasAdd",
                 "type": "float",
                 "shape": [
                     1,
-                    50
+                    100
                 ],
                 "op": "fully connected",
-                "description": "logits",
+                "description": "penultimate layer",
                 "output_purpose": ""
             },
             {

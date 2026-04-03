@@ -1,76 +1,27 @@
 {
-    "name": "MSD MusiCNN",
-    "type": "auto-tagging",
-    "link": "https://essentia.upf.edu/models/feature-extractors/musicnn/msd-musicnn-1.pb",
+    "name": "mood relaxed",
+    "type": "multi-class classifier",
+    "link": "https://essentia.upf.edu/models/classifiers/mood_relaxed/mood_relaxed-musicnn-mtt-2.pb",
     "version": "1",
-    "description": "prediction of the top-50 tags in the dataset",
+    "description": "classification of music by mood (relaxed/non-relaxed)",
     "author": "Pablo Alonso",
     "email": "pablo.alonso@upf.edu",
-    "release_date": "2020-03-31",
+    "release_date": "2020-07-07",
     "framework": "tensorflow",
     "framework_version": "1.15.0",
     "classes": [
-        "rock",
-        "pop",
-        "alternative",
-        "indie",
-        "electronic",
-        "female vocalists",
-        "dance",
-        "00s",
-        "alternative rock",
-        "jazz",
-        "beautiful",
-        "metal",
-        "chillout",
-        "male vocalists",
-        "classic rock",
-        "soul",
-        "indie rock",
-        "Mellow",
-        "electronica",
-        "80s",
-        "folk",
-        "90s",
-        "chill",
-        "instrumental",
-        "punk",
-        "oldies",
-        "blues",
-        "hard rock",
-        "ambient",
-        "acoustic",
-        "experimental",
-        "female vocalist",
-        "guitar",
-        "Hip-Hop",
-        "70s",
-        "party",
-        "country",
-        "easy listening",
-        "sexy",
-        "catchy",
-        "funk",
-        "electro",
-        "heavy metal",
-        "Progressive rock",
-        "60s",
-        "rnb",
-        "indie pop",
-        "sad",
-        "House",
-        "happy"
+        "non_relaxed",
+        "relaxed"
     ],
     "model_types": [
         "frozen_model"
     ],
     "dataset": {
-        "name": "The Millon Song Dataset",
-        "citation": "http://millionsongdataset.com/",
-        "size": "200k up to two minutes audio previews",
+        "name": "In-house MTG collection",
+        "citation": "@inproceedings{laurier2009music,\n  title={Music mood annotator design and integration},\n  author={Laurier, Cyril and Meyers, Owen and Serra, Joan and Blech, Martin and Herrera, Perfecto},\n  booktitle={2009 Seventh International Workshop on Content-Based Multimedia Indexing},\n  pages={156--161},\n  year={2009},\n  organization={IEEE}\n}",
+        "size": "446 full tracks + excerpts, 145/301 per class",
         "metrics": {
-            "ROC-AUC": 0.88,
-            "PR-AUC": 0.29
+            "5-fold_cross_validation_normalized_accuracy": 0.88
         }
     },
     "schema": {
@@ -87,20 +38,31 @@
                 "type": "float",
                 "shape": [
                     1,
-                    50
+                    2
                 ],
                 "op": "Sigmoid",
                 "output_purpose": "predictions"
+            },
+            {
+                "name": "model/dense_2/BiasAdd",
+                "type": "float",
+                "shape": [
+                    1,
+                    2
+                ],
+                "op": "fully connected",
+                "description": "logits",
+                "output_purpose": ""
             },
             {
                 "name": "model/dense_1/BiasAdd",
                 "type": "float",
                 "shape": [
                     1,
-                    50
+                    100
                 ],
                 "op": "fully connected",
-                "description": "logits",
+                "description": "penultimate layer",
                 "output_purpose": ""
             },
             {

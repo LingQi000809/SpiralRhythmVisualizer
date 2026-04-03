@@ -24,4 +24,5 @@ dist-ssr
 *.sw?
 
 venv
+tfjs_env
 __pycache__

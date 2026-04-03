@@ -18,28 +18,10 @@ export interface FrameFeatures {
   flux?: number;
 }
 
-interface AnalysisLabels {
-  chord: string;
-
-  topGenres: { label: string; score: number }[];
-  topMoods: { label: string; score: number }[];
-  topInstruments: { label: string; score: number }[];
-  topAll: { label: string; score: number }[];
-}
-
 interface VisualizationWaitingViewProps {
   audioUrl: string | null;
   audioRef: React.RefObject<HTMLAudioElement | null>;
   isVisible?: boolean;
-}
-
-interface ClassificationWindow {
-  startTime: number; // seconds
-  endTime: number;   // seconds
-  topGenres: { label: string; score: number }[];
-  topMoods: { label: string; score: number }[];
-  topInstruments: { label: string; score: number }[];
-  topAll: { label: string; score: number }[];
 }
 
 function normalizeFeatureArr(
@@ -93,169 +75,89 @@ function drawNote(
   ctx.fill();
 }
 
+interface MoodPrediction {
+  startTime: number;
+  endTime: number;
+  mood: string;
+  score: number;
+}
 
-// Model JSON downloaded from https://essentia.upf.edu/models 
-const modelDir = '/models/mtt-musicnn-1/'; 
-const metadataJson = modelDir + 'meta.json';
-const modelJson = modelDir + 'model.json';
-// From the classes field of metadataJson
-const GENRE_TAGS = new Set([
-  "classical",
-  "techno",
-  "electronic",
-  "rock",
-  "ambient",
-  "indian",
-  "opera",
-  "pop",
-  "classic",
-  "new age",
-  "dance",
-  "weird",
-  "country",
-  "metal",
-]);
-
-const MOOD_TAGS = new Set([
-  "slow",
-  "fast",
-  "beat",
-  "loud",
-  "quiet",
-  "soft",
-  "dance",
-]);
-
-const INSTRUMENT_TAGS = new Set([
-  "guitar",
-  "strings",
-  "drums",
-  "piano",
-  "violin",
-  "vocal",
-  "synth",
-  "female",
-  "male",
-  "singing",
-  "vocals",
-  "no vocals",
-  "harpsichord",
-  "flute",
-  "woman",
-  "male vocal",
-  "no vocal",
-  "sitar",
-  "solo",
-  "man",
-  "choir",
-  "voice",
-  "male voice",
-  "female vocal",
-  "beats",
-  "harp",
-  "cello",
-  "no voice",
-  "female voice",
-  "choral"
-]);
+const MOOD_EMOJIS: Record<string, string> = {
+  aggressive: "👊",
+  danceable: "💃",
+  happy: "😄",
+  relaxed: "😌",
+  sad: "😢",
+};
+const moods = Object.keys(MOOD_EMOJIS);
 
 // See tutorial page for the basic workflow: https://mtg.github.io/essentia.js/docs/api/tutorial-3.%20Machine%20learning%20inference%20with%20Essentia.js.html
-// For the list of available models: https://essentia.upf.edu/models/
+// For the list of available models: https://essentia.upf.edu/models.html
 // Some of the functions are out-dated. Also check visualization/node_modules/essentia.js/dist/essentia.js-model.es.js for source code.
-const runMLClassification = async (audioBuffer: AudioBuffer, windowSec = 3): Promise<ClassificationWindow[]> => {
+const runMLClassification = async (
+  audioBuffer: AudioBuffer
+  // windowSec: number = 6
+) => {
   // Extract features
   const inputExtractor = new EssentiaTFInputExtractor(EssentiaWASM, "musicnn", false);
   const resampledSignal = await inputExtractor.downsampleAudioBuffer(audioBuffer);
   const inputFeatures = inputExtractor.computeFrameWise(resampledSignal, inputExtractor.frameSize);
 
-  // Initialize the Model
-  const musicnn = new TensorflowMusiCNN(tf, modelJson, true);
-  await (musicnn as any).initialize();
+  const resultsPerMood = await Promise.all(
+    moods.map(async (mood) => {
+      const modelDir = `/models/moods/${mood}/`; 
+      const modelJson = modelDir + "model.json";
+      const metadataJson = modelDir + "meta.json";
+      const res = await fetch(metadataJson);
+      const json = await res.json();
+      const mood_idx = json.classes.indexOf(mood);
 
-  // Load Model Labels
-  const res = await fetch(metadataJson);
-  const json = await res.json();
-  const labels = json.classes;
-  const numClasses = labels.length;
+      const musicnn = new TensorflowMusiCNN(tf, modelJson, true);
+      await (musicnn as any).initialize();
 
-  // Predict
-  const predictions = await musicnn.predict(inputFeatures, true); // shape: [frames, 50]
+      const predictions = await musicnn.predict(inputFeatures, true);
+      console.log("mood: ", mood, predictions);
+      const mood_scores = predictions.map((prediction: number[]) => prediction[mood_idx]);
+      console.log(mood_scores);
+      return { mood, mood_scores };
+    })
+  );
+  console.log(resultsPerMood);
 
-  // Process predictions
-  // The model outputs an Array(50) of tag activations for every 3 seconds of audio.
-  // We aggregate scores to get time-based prediction.
-  const windows: ClassificationWindow[] = [];
-  const predictionWindowSec = 3; // fixed by the model
-  const predictionsPerWindow = Math.ceil(windowSec / predictionWindowSec);
+  const numPatches = resultsPerMood[0].mood_scores.length;
+  const patchDurationSec = audioBuffer.duration / numPatches;
+  // const patchDurationSec = (187 * 256) / 16000; // MusiCNN fixed patch length (~3s)
 
-  for (let wStart = 0; wStart < predictions.length; wStart += predictionsPerWindow) {
-    const windowFrames = predictions.slice(wStart, wStart + predictionsPerWindow);
-    const avgScores: number[] = new Array(numClasses).fill(0);
+  const moodsPredicted: MoodPrediction[] = [];
 
-    windowFrames.forEach((frame: number[]) => {
-      for (let i = 0; i < numClasses; i++) avgScores[i] += frame[i];
-    });
-    for (let i = 0; i < numClasses; i++) avgScores[i] /= windowFrames.length;
+  for (let i = 0; i < numPatches; i++) {
+    // Collect scores for this patch
+    const patchScores = resultsPerMood.map(m => ({ mood: m.mood, score: m.mood_scores[i] }));
+    const sorted = patchScores.sort((a, b) => b.score - a.score);
+    // Select confident moods
+    let selected = sorted.filter(s => s.score >= 0.8);
+    // If none, select top 1 if somewhat certain
+    if (selected.length === 0 && sorted[0].score >= 0.3) {
+      selected = [sorted[0]];
+    }
+    // Skip if no mood meets criteria
+    if (selected.length === 0) continue;
 
-    const ranked = avgScores
-      .map((v, i) => ({ label: labels[i], score: v }))
-      .sort((a, b) => b.score - a.score);
-
-    const MIN_CONF = 0.15;
-    const genres = ranked.filter(t => GENRE_TAGS.has(t.label.toLowerCase()) && t.score > MIN_CONF);
-    const moods = ranked.filter(t => MOOD_TAGS.has(t.label.toLowerCase()) && t.score > MIN_CONF);
-    const instruments = ranked.filter(t => INSTRUMENT_TAGS.has(t.label.toLowerCase()) && t.score > MIN_CONF);
-
-    const startTime: number = wStart * predictionWindowSec;
-    const endTime: number = Math.min(audioBuffer.duration, startTime + windowSec);
-
-    windows.push({
-      startTime,
-      endTime,
-      topGenres: genres.length > 3 ? genres.slice(0, 3): genres,
-      topMoods: moods.length > 3 ? moods.slice(0, 3): moods,
-      topInstruments: instruments.length > 3 ? instruments.slice(0, 3): instruments,
-      topAll: ranked.slice(0, 5),
+    const startTime = i * patchDurationSec;
+    const endTime = startTime + patchDurationSec;
+    selected.forEach(s => {
+      moodsPredicted.push({ startTime, endTime, mood: s.mood, score: s.score });
     });
   }
 
-  return windows;
+  console.log(moodsPredicted);
+  return moodsPredicted;
 };
 
-const renderTagList = (title: string, items: {label: string; score: number}[], color: string) => (
-  <div style={{ marginBottom: 8 }}>
-    <div style={{ color: color, fontSize: '11px', marginBottom: 4 }}>
-      {title}
-    </div>
-
-    {items.map((item, i) => (
-      <div key={i} style={{ marginBottom: 4 }}>
-        <div style={{
-          display: 'flex',
-          justifyContent: 'space-between',
-          fontSize: '11px',
-          color: 'white'
-        }}>
-          <span>{item.label}</span>
-          <span>{item.score.toFixed(2)}</span>
-        </div>
-
-        <div style={{
-          height: 3,
-          background: 'rgba(255,255,255,0.1)',
-          borderRadius: 2,
-          overflow: 'hidden'
-        }}>
-          <div style={{
-            width: `${item.score * 100}%`,
-            height: '100%',
-            background: color
-          }} />
-        </div>
-      </div>
-    ))}
-  </div>
-);
+function mapPitch(pitch: number, center = 60, spread = 6) {
+  const x = (pitch - center) / spread;
+  return 1 / (1 + Math.exp(-x)); // 0–1
+}
 
 export function VisualizationWaitingView({
   audioUrl,
@@ -264,18 +166,9 @@ export function VisualizationWaitingView({
 }: VisualizationWaitingViewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const featuresRef = useRef<FrameFeatures[]>([]);
-  const chordTimelineRef = useRef<{time: number, chord: string}[]>([]);
+  const moodLabelRef = useRef<MoodPrediction[]>([]);
   const durationRef = useRef<number>(0);
   const rafRef = useRef<number | null>(null);
-  const currentLabelsRef = useRef<AnalysisLabels>({
-    chord: "",
-    topGenres: [], 
-    topMoods: [],
-    topInstruments: [],
-    topAll: []
-  });
-  const timeBasedLabelsRef = useRef<ClassificationWindow[]>([]);
-  const [displayLabels, setDisplayLabels] = useState<AnalysisLabels>(currentLabelsRef.current);
 
   // Add a locking ref to prevent double execution
   const analysisStartedRef = useRef(false);
@@ -316,7 +209,8 @@ export function VisualizationWaitingView({
       const rawRms: number[] = [];
       const rawCentroid: number[] = [];
       const frameTimes: number[] = [];    
-      const hpcpVectors = new essentia.module.VectorVectorFloat();  
+      // const rawOnsets: number[] = [];
+      // const rawFlux: number[] = [];
 
       const loopStart = performance.now();
       console.log("Analyzing frame-wise spectral features, pitch, rms, and chords");
@@ -329,6 +223,10 @@ export function VisualizationWaitingView({
         const spectrum = (essentia.Spectrum(frame) as any).spectrum;
         const { rms } = essentia.RMS(frame) as any;
         const { centroid } = essentia.Centroid(spectrum) as any; 
+        // const { hfc } = essentia.HFC(spectrum) as any;
+        // rawOnsets.push(hfc);
+        // const { flux } = essentia.Flux(spectrum) as any;
+        // rawFlux.push(flux);
         times.spectral += (performance.now() - ts);
 
         // Pitch
@@ -341,46 +239,6 @@ export function VisualizationWaitingView({
         // rawPitch.push(pitchConfidence > 0.8 ? (69 + 12 * Math.log2(pitch / 440)) : 0);
         times.pitch += (performance.now() - tp);
 
-        // HPCP (chord)
-        const th = performance.now();
-        const peaks = essentia.SpectralPeaks(
-          spectrum,
-          0.00001, // magnitudeThreshold
-          3500, // maxFrequency
-          100, // maxPeaks
-          20, // minFrequency
-          "magnitude", // orderBy
-          sampleRate 
-        ) as any;
-        const whitened = essentia.SpectralWhitening(spectrum, peaks.frequencies, peaks.magnitudes) as any;
-        // console.log("peaks");
-        // console.log(essentia.vectorToArray(peaks.frequencies), essentia.vectorToArray(peaks.magnitudes));
-        const hpcpResult = essentia.HPCP(
-          peaks.frequencies,   // frequencies: VectorFloat
-          whitened.magnitudes,     // magnitudes: VectorFloat
-          false,                // bandPreset: boolean (false = custom range)
-          500,                  // bandSplitFrequency: number
-          8,                    // harmonics: number (number of harmonics to consider)
-          3500,                 // maxFrequency: number
-          false,                // maxShifted: boolean
-          20,                   // minFrequency: number
-          false,                // nonLinear: boolean
-          "unitSum",            // normalized: string
-          440,                  // referenceFrequency: number
-          sampleRate,           // sampleRate: number
-          12,                   // size: number (STRICTLY 12 for ChordsDetection)
-          "cosine",             // weightType: string
-          1.0                   // windowSize: number
-        ) as any;
-
-        // console.log("========HPCP========");
-        // const arr = essentia.vectorToArray(hpcpResult.hpcp);
-        // console.log(arr);
-
-        hpcpVectors.push_back(hpcpResult.hpcp);
-
-        times.hpcp += (performance.now() - th);
-
         rawRms.push(rms);
         rawCentroid.push(centroid);
         frameTimes.push(time);
@@ -391,49 +249,6 @@ export function VisualizationWaitingView({
       console.log(`⏱ Total Frame Analysis Time: ${(performance.now() - loopStart).toFixed(2)}ms; Number of frames = ${frames.size()}`);
       console.log(`   - Spectral Avg: ${(times.spectral / frames.size()).toFixed(4)}ms/frame`);
       console.log(`   - Pitch Avg: ${(times.pitch / frames.size()).toFixed(4)}ms/frame`);
-      console.log(`   - HPCP Avg: ${(times.hpcp / frames.size()).toFixed(4)}ms/frame`);
-
-      // --- Chord Estimation ---
-      const notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
-      const hpcpData = essentia.vectorToArray(hpcpVectors);
-
-      const hpcpFrames: number[][] = [];
-      for (let i = 0; i < hpcpVectors.size(); i++) {
-        const vecFloat = hpcpVectors.get(i);
-        const frameArr = Array.from(essentia.vectorToArray(vecFloat)); // convert to number[]
-        hpcpFrames.push(frameArr);
-      }
-      console.log(hpcpFrames);
-
-      const tc = performance.now();
-      const chordsResult = essentia.ChordsDetection(hpcpVectors);
-      console.log("========CHORD DETECTION========");
-      console.log(chordsResult)
-      const chordsVector = (chordsResult as any).chords;
-      console.log(essentia.vectorToArray(chordsVector));
-
-      console.log(`⏱ Chord Estimation: ${(performance.now() - tc).toFixed(2)}ms`);
-      const chordsArray = (essentia as any).vectorToArray(chordsVector) as string[];
-
-      const offlineChords: {time: number, chord: string}[] = [];
-
-      for (let i = 0; i < chordsArray.length; i++) {
-        let currentChord = chordsArray[i];
-        if (!currentChord || currentChord === "NaN") {
-          currentChord = "";
-        }
-        const lastChord = offlineChords[offlineChords.length - 1]?.chord;
-
-        // Only push if the chord changed to keep the timeline clean
-        if (currentChord !== lastChord) {
-          offlineChords.push({
-            time: frameTimes[i],
-            chord: currentChord
-          });
-        }
-      }
-      chordTimelineRef.current = offlineChords;
-      console.table(chordTimelineRef.current);
 
       // --- Group features into notes ---
       console.log("Grouping features per note");
@@ -456,8 +271,8 @@ export function VisualizationWaitingView({
       
       // --- Classification ML ---
       const tMLStart = performance.now();
-      const mlWindows: ClassificationWindow[] = await runMLClassification(audioBuffer, 3);
-      timeBasedLabelsRef.current = mlWindows;
+      const timeStampedMoods = await runMLClassification(audioBuffer);
+      moodLabelRef.current = timeStampedMoods;
       const tMLEnd = performance.now();
 
       console.log(`⏱ ML Classification Time: ${(tMLEnd - tMLStart).toFixed(2)}ms`);
@@ -517,31 +332,26 @@ export function VisualizationWaitingView({
 
       ctx.clearRect(0, 0, w, h);
 
-      const currentTime: number = audio.currentTime;
-
-      // Find the current classification window for this time
-      const currentWindow: ClassificationWindow | undefined = timeBasedLabelsRef.current.find(
-        (w: ClassificationWindow) => currentTime >= w.startTime && currentTime < w.endTime
+      const currentMoods = moodLabelRef.current.filter(
+        (m) => t >= m.startTime && t <= m.endTime
       );
-      if (currentWindow) {
-        setDisplayLabels(prev => ({
-          ...prev,
-          topGenres: currentWindow.topGenres,
-          topMoods: currentWindow.topMoods,
-          topInstruments: currentWindow.topInstruments,
-          topAll: currentWindow.topAll,
-        }));
-      }
+      currentMoods.forEach((m, index) => {
+        // Set alpha based on the ML score (0.0 to 1.0)
+        ctx.globalAlpha = Math.min(m.score, 1.0);
+        
+        ctx.font = "48px serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
 
-      // Update Chord Label from pre-calculated timeline
-      const currentChordEntry = [...chordTimelineRef.current]
-        .reverse()
-        .find(entry => entry.time <= t);
-      
-      if (currentChordEntry && currentChordEntry.chord !== currentLabelsRef.current.chord) {
-        currentLabelsRef.current.chord = currentChordEntry.chord;
-        setDisplayLabels(prev => ({ ...prev, chord: currentChordEntry.chord }));
-      }
+        // Offset multiple emojis if they overlap in the same time window
+        const xOffset = (index - (currentMoods.length - 1) / 2) * 60;
+        const emoji = MOOD_EMOJIS[m.mood] || "";
+
+        ctx.fillText(emoji, cx + xOffset, cy);
+      });
+
+      // Reset alpha for subsequent drawing
+      ctx.globalAlpha = 1.0;
 
       featuresRef.current.forEach((evt) => {
         const dt = t - evt.time;
@@ -565,7 +375,7 @@ export function VisualizationWaitingView({
 
         const rms = evt.rms;
         const centroid = evt.centroid;
-        const pitchNorm = evt.pitch / 127;
+        const pitchNorm = mapPitch(evt.pitch);
         const rBase = baseRadius + (pitchNorm - 0.5) * baseRadius;
 
         const orbitIndex = Math.floor(evt.time / orbitDuration);
@@ -652,39 +462,6 @@ export function VisualizationWaitingView({
         ref={canvasRef}
         style={{ width: '100%', height: '100%', maxHeight: '80vh', position: 'relative' }}
       />
-      {/* The Center Chord Label */}
-      <div
-        style={{
-          position: 'absolute',
-          top: '50%',
-          left: '50%',
-          transform: 'translate(-50%, -50%)',
-          pointerEvents: 'none', // Allow clicks to pass through to canvas if needed
-          textAlign: 'center',
-          zIndex: 10,
-        }}
-      >
-        <div
-          style={{
-            color: 'white',
-            fontSize: '2.5rem',
-            fontWeight: 'bold',
-            fontFamily: 'monospace',
-            textShadow: '0 0 20px rgba(255,255,255,0.5), 0 0 10px rgba(0,255,204,0.3)',
-            letterSpacing: '4px',
-            transition: 'all 0.2s ease-out', // Smooth transition when chord changes
-          }}
-        >
-          {displayLabels.chord}
-        </div>
-      </div>
-      {/* HUD for high-level classification */}
-      <div style={{ position: 'absolute', bottom: 24, left: 24, width: 160 }}>
-        {renderTagList("GENRES", displayLabels.topGenres || [], "#00ffcc")}
-        {renderTagList("MOODS", displayLabels.topMoods || [], "#52a9ffff")}
-        {renderTagList("INSTRUMENTS", displayLabels.topInstruments || [], "#9575fdff")}
-        {renderTagList("ALL TAGS", displayLabels.topAll || [], "#ffaa33")}
-      </div>
     </div>
   );
 }

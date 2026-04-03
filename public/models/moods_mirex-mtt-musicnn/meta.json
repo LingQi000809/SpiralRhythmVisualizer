@@ -1,0 +1,88 @@
+{
+    "name": "moods mirex",
+    "type": "multi-class classifier",
+    "link": "https://essentia.upf.edu/models/classifiers/moods_mirex/moods_mirex-musicnn-mtt-1.pb",
+    "version": "1",
+    "description": "classification of music into 5 mood clusters",
+    "author": "Pablo Alonso",
+    "email": "pablo.alonso@upf.edu",
+    "release_date": "2021-11-26",
+    "framework": "tensorflow",
+    "framework_version": "2.3.2",
+    "classes": [
+        "passionate, rousing, confident, boisterous, rowdy",
+        "rollicking, cheerful, fun, sweet, amiable/good natured",
+        "literate, poignant, wistful, bittersweet, autumnal, brooding",
+        "humorous, silly, campy, quirky, whimsical, witty, wry",
+        "aggressive, fiery, tense/anxious, intense, volatile, visceral"
+    ],
+    "model_types": [
+        "frozen_model"
+    ],
+    "dataset": {
+        "name": "In-house MTG collection",
+        "citation": "@inproceedings{hu2007exploring,\ntitle={Exploring Mood Metadata: Relationships with Genre, Artist and Usage Metadata.},\nauthor={Hu, Xiao and Downie, J Stephen},\nbooktitle={ISMIR},\npages={67--72},\nyear={2007},\norganization={Citeseer}\n}",
+        "size": "269 track excerpts, 60-110 per class",
+        "metrics": {
+            "5-fold_cross_validation_normalized_accuracy": 0.58
+        }
+    },
+    "schema": {
+        "inputs": [{
+            "name": "model/Placeholder",
+            "type": "float",
+            "shape": [
+                187,
+                96
+            ]
+        }],
+        "outputs": [{
+                "name": "model/Softmax",
+                "type": "float",
+                "shape": [
+                    1,
+                    5
+                ],
+                "op": "Softmax",
+                "output_purpose": "predictions"
+            },
+            {
+                "name": "model/dense_2/BiasAdd",
+                "type": "float",
+                "shape": [
+                    1,
+                    5
+                ],
+                "op": "fully connected",
+                "description": "logits",
+                "output_purpose": ""
+            },
+            {
+                "name": "model/dense_1/BiasAdd",
+                "type": "float",
+                "shape": [
+                    1,
+                    100
+                ],
+                "op": "fully connected",
+                "description": "penultimate layer",
+                "output_purpose": ""
+            },
+            {
+                "name": "model/dense/BiasAdd",
+                "type": "float",
+                "shape": [
+                    1,
+                    200
+                ],
+                "op": "fully connected",
+                "output_purpose": "embeddings"
+            }
+        ]
+    },
+    "citation": "",
+    "inference": {
+        "sample_rate": 16000,
+        "algorithm": "TensorflowPredictMusiCNN"
+    }
+}
