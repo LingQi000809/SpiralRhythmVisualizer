@@ -335,7 +335,11 @@ export function VisualizationWaitingView({
       const currentMoods = moodLabelRef.current.filter(
         (m) => t >= m.startTime && t <= m.endTime
       );
+
+      // drawMoodBackground(ctx, "danceable", t, w, h, 0.8);
+
       currentMoods.forEach((m, index) => {
+
         // Set alpha based on the ML score (0.0 to 1.0)
         ctx.globalAlpha = Math.min(m.score, 1.0);
         
@@ -464,4 +468,154 @@ export function VisualizationWaitingView({
       />
     </div>
   );
+}
+
+function drawMoodBackground(
+  ctx: CanvasRenderingContext2D,
+  mood: string,
+  t: number,
+  w: number,
+  h: number,
+  intensity: number
+) {
+  // ctx.save();
+
+  switch (mood) {
+    case "aggressive":
+      drawAggressive(ctx, t, w, h, intensity);
+      break;
+    case "danceable":
+      drawDanceable(ctx, t, w, h, intensity);
+      break;
+    case "happy":
+      drawHappy(ctx, t, w, h, intensity);
+      break;
+    case "relaxed":
+      drawRelaxed(ctx, t, w, h, intensity);
+      break;
+    case "sad":
+      drawSad(ctx, t, w, h, intensity);
+      break;
+  }
+
+  // ctx.restore();
+}
+
+// shock wave
+function drawAggressive(
+  ctx: CanvasRenderingContext2D,
+  t: number,
+  w: number,
+  h: number,
+  intensity: number
+) {
+  const cx = w / 2;
+  const cy = h / 2;
+
+  const speed = 200;
+  const maxRadius = Math.max(w, h);
+
+  for (let i = 0; i < 3; i++) {
+    const phase = (t * speed + i * 100) % maxRadius;
+    const alpha = (1 - phase / maxRadius) * 0.15 * intensity;
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, phase, 0, Math.PI * 2);
+    ctx.strokeStyle = `rgba(255, 80, 80, ${alpha})`;
+    ctx.lineWidth = 5;
+    ctx.stroke();
+  }
+}
+
+// color blobs
+function drawDanceable(
+  ctx: CanvasRenderingContext2D,
+  t: number,
+  w: number,
+  h: number,
+  intensity: number
+) {
+  const blobs = 5;
+
+  for (let i = 0; i < blobs; i++) {
+    const x = (Math.sin(t * 0.5 + i) * 0.5 + 0.5) * w;
+    const y = (Math.cos(t * 0.4 + i * 2) * 0.5 + 0.5) * h;
+
+    const radius = 150 + Math.sin(t + i) * 50;
+
+    const hue = (t * 30 + i * 60) % 360;
+
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, radius);
+
+    grad.addColorStop(0, `hsla(${hue}, 80%, 70%, ${0.12 * intensity})`);
+    grad.addColorStop(1, "transparent");
+
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
+function drawHappy(ctx: CanvasRenderingContext2D, t: number, w: number, h: number, intensity: number) {
+  const particles = 15;
+  
+  for (let i = 0; i < particles; i++) {
+    // Unique seed for each particle based on index
+    const x = ((i * 137.5) % 100) / 100 * w; 
+    const speed = 20 + (i % 5) * 10;
+    const y = h - ((t * speed + i * 100) % (h + 200)); // Moves upward
+    
+    const size = 40 + (i % 10) * 20;
+    const alpha = Math.sin((y / h) * Math.PI) * 0.2 * intensity; // Fade in/out
+
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, size);
+    grad.addColorStop(0, `hsla(${40 + i * 2}, 90%, 70%, ${alpha})`); // Warm golds/pinks
+    grad.addColorStop(1, "transparent");
+
+    ctx.fillStyle = grad;
+    ctx.fillRect(x - size, y - size, size * 2, size * 2);
+  }
+}
+
+function drawRelaxed(ctx: CanvasRenderingContext2D, t: number, w: number, h: number, intensity: number) {
+  const layers = 3;
+  ctx.globalCompositeOperation = "screen"; // Blends colors softly
+
+  for (let i = 0; i < layers; i++) {
+    ctx.beginPath();
+    const fillAlpha = (0.1 + i * 0.05) * intensity;
+    ctx.fillStyle = `rgba(130, 180, 230, ${fillAlpha})`;
+    
+    ctx.moveTo(0, h);
+    // Create a wave using sine
+    for (let x = 0; x <= w; x += 20) {
+      const y = h - (50 + i * 40) - Math.sin(t * 0.5 + x * 0.005 + i) * 30;
+      ctx.lineTo(x, y);
+    }
+    
+    ctx.lineTo(w, h);
+    ctx.fill();
+  }
+}
+
+function drawSad(ctx: CanvasRenderingContext2D, t: number, w: number, h: number, intensity: number) {
+  const clouds = 4;
+  ctx.globalCompositeOperation = "source-over";
+
+  for (let i = 0; i < clouds; i++) {
+    const y = h * 0.3 + (i * h * 0.15);
+    const xOffset = Math.sin(t * 0.2 + i) * 100;
+    const opacity = (0.05 + Math.sin(t * 0.4 + i) * 0.02) * intensity;
+
+    // Stretched ellipse gradient
+    const grad = ctx.createRadialGradient(w/2 + xOffset, y, 0, w/2 + xOffset, y, w * 0.8);
+    grad.addColorStop(0, `rgba(100, 120, 160, ${opacity})`);
+    grad.addColorStop(1, "transparent");
+
+    ctx.fillStyle = grad;
+    ctx.setTransform(2, 0, 0, 0.5, -w/2, 0); // Stretch horizontally
+    ctx.fillRect(0, 0, w * 2, h * 2);
+    ctx.resetTransform();
+  }
 }
