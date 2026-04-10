@@ -1,13 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import Meyda from "meyda";
 import { PitchDetector } from "pitchy";
-import { Essentia } from 'essentia.js';
-import { EssentiaWASM } from 'essentia.js/dist/essentia-wasm.es.js'
 
 export interface FrameFeatures {
   time: number;        // seconds
   duration: number;    // seconds (per note segment)
   pitch: number;       // MIDI
+  pitchConf: number;   // confidence about pitch
   rms: number;         // 0-1 normalized
   centroid: number;    // 0-1 normalized
   flux?: number;
@@ -19,22 +18,39 @@ interface VisualizationWaitingViewProps {
   isVisible?: boolean;
 }
 
-function normalizeFeatureArr(
+function normalizeFeatureArr (
   arr: number[],
-  pMin = 20,
-  pMax = 80
+  log = true,
+  eps = 1e-6
 ): number[] {
-  const logArr = arr.map(v => Math.log1p(v));
+  if (!arr.length) return [];
+  const values = log ? arr.map(v => Math.log1p(v)) : [...arr];
+  const sorted = [...values].sort((a, b) => a - b);
 
-  const sorted = [...logArr].sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length * 0.5)];
+  const q1 = sorted[Math.floor(sorted.length * 0.25)];
+  const q3 = sorted[Math.floor(sorted.length * 0.75)];
+  const iqr = Math.max(q3 - q1, eps);
 
-  const minVal = sorted[Math.floor((pMin / 100) * sorted.length)];
-  const maxVal = sorted[Math.floor((pMax / 100) * sorted.length)];
-
-  return logArr.map(v => {
-    const norm = (v - minVal) / (maxVal - minVal);
-    return Math.min(1, Math.max(0, norm));
+  // --- linear normalization around median ---
+  const normalized = values.map(v => {
+    const centered = (v - median) / (2 * iqr); // roughly [-0.5, 0.5]
+    return centered;
   });
+
+  // --- remap to 0–1 ---
+  let min = Math.min(...normalized);
+  let max = Math.max(...normalized);
+
+  // prevent collapse
+  if (Math.abs(max - min) < eps) {
+    return normalized.map(() => 0.5);
+  }
+  const scaled = normalized.map(v => (v - min) / (max - min));
+
+  // --- gentle shaping ---
+  return scaled.map(v => Math.pow(v, 0.9)); // subtle contrast boost
+
 }
 
 // Map RMS and spectral centroid to galaxy-like color
@@ -68,6 +84,31 @@ function drawNote(
   ctx.beginPath();
   ctx.arc(x, y, size, 0, Math.PI * 2);
   ctx.fill();
+}
+
+function drawLabel(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  text: string,
+  life: number,
+  angle: number,
+  rms: number
+) {
+  if (life < 0.08) return;
+
+  // radial offset (stable, cheap)
+  const offset = 14 + rms * 6;
+  const lx = x + Math.cos(angle) * offset;
+  const ly = y + Math.sin(angle) * offset;
+
+  ctx.globalAlpha = life * 0.7;
+  ctx.fillStyle = "rgba(255,255,255,0.75)";
+  ctx.font = "18px sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  ctx.fillText(text, lx, ly);
 }
 
 function mapPitch(pitch: number) {
@@ -117,18 +158,37 @@ function medianPitch(pitches: number[]): number {
   }
 }
 
+function midiToNoteName(midi: number): string {
+  if (!midi || midi <= 0) return "--";
+
+  const noteNames = [
+    "C", "C#/Db", "D", "D#/Eb", "E", "F",
+    "F#/Gb", "G", "G#/Ab", "A", "A#/Bb", "B"
+  ];
+
+  const pitchClass = Math.round(midi) % 12;
+  const octave = Math.floor(midi / 12) - 1;
+
+  return `${noteNames[pitchClass]}${octave}`;
+}
+
 export function VisualizationWaitingView({
   audioUrl,
   audioRef,
   isVisible = true,
 }: VisualizationWaitingViewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
   const featuresRef = useRef<FrameFeatures[]>([]);
   const durationRef = useRef<number>(0);
+  const likelyPolyphonic = useRef<boolean>(false);
   const rafRef = useRef<number | null>(null);
 
   // Add a locking ref to prevent double execution
   const analysisStartedRef = useRef(false);
+
+  const longNoteDurationThreshold = 0.2;
+  const lowNoteThreshold = 47; // Anything below MIDI=40 is likely noise from polyphonic pitch detection
 
   // --- EFFECT 1: OFFLINE ANALYSIS ---
   useEffect(() => {
@@ -141,97 +201,62 @@ export function VisualizationWaitingView({
 
       // Measure Fetch/Decode
       const tFetch = performance.now();
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
       const response = await fetch(audioUrl);
-      const audioBuffer = await audioCtx.decodeAudioData(await response.arrayBuffer());
+      const arrayBuffer = await response.arrayBuffer();
+      
+      audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+      const audioBuffer = await audioContextRef.current!.decodeAudioData(arrayBuffer);
       durationRef.current = audioBuffer.duration;
+
+      // const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+      // const response = await fetch(audioUrl);
+      // const audioBuffer = await audioCtx.decodeAudioData(await response.arrayBuffer());
+      // durationRef.current = audioBuffer.duration;
       const sampleRate = audioBuffer.sampleRate;
       const frameSize = 2048;
-      const hopSize = 128;
+      const hopSize = 512;
+      const channelData = audioBuffer.getChannelData(0);
+      Meyda.sampleRate = sampleRate;
+      Meyda.bufferSize = frameSize;
       console.log(`⏱ Decode Time: ${(performance.now() - tFetch).toFixed(2)}ms`);
 
-      // Essentia
-      console.log("Starting Essentia analysis...");
-      const essentia = new Essentia(EssentiaWASM);
-      console.log("Essentia Version:", essentia.version);
-      // Pitch Detector
-      // const bufferSize = 2048;
-      // const detector = PitchDetector.forFloat32Array(bufferSize);
+      const detector = PitchDetector.forFloat32Array(frameSize);
       
-      const signal = essentia.audioBufferToMonoSignal(audioBuffer) as Float32Array;
-
-      // ===================
-      //        PITCH
-      // ===================
-      console.log("Extracting pitch with PredominantPitchMelodia...");
-      const pitchExtractionStartTime = performance.now();
-      const eqloudnessSignal = essentia.EqualLoudness(essentia.arrayToVector(signal), sampleRate) as any;
-      console.log(eqloudnessSignal);
-      const pitchValues = essentia.PredominantPitchMelodia(eqloudnessSignal.signal) as any;
-      console.log(pitchValues);
-      const pitchHz = pitchValues.pitch;
-      console.log(pitchHz);
-      const pitchConfidence = pitchValues.pitchConfidence;
-      const n = pitchHz.length;
-      const pitchTimes = n === 1 ? [0] : Array.from({ length: n }, (_, i) =>
-        i * (durationRef.current / (n - 1))
-      );
-      console.log(`⏱ Total Pitch Extraction Time: ${(performance.now() - pitchExtractionStartTime).toFixed(2)}ms`);
-
       // ===================
       //     FRAME-WISE
       //  RMS, Centroid 
       // ===================
-      const frames = essentia.FrameGenerator(signal, frameSize, hopSize);
       const rawRms: number[] = [];
       const rawCentroid: number[] = [];
+      const rawPitchMidi: number[] = [];
+      const pitchConfs: number[] = [];
       const frameTimes: number[] = [];
       
       console.log("Analyzing frame-wise spectral features and rms...");
       const framewiseStartTime = performance.now();
-      for (let i = 0; i < frames.size(); i++) {
-        const frame = frames.get(i);
-        const time = (i * hopSize) / sampleRate;
-        const spectrum = (essentia.Spectrum(frame) as any).spectrum;
-        const { rms } = essentia.RMS(frame) as any;
-        const { centroid } = essentia.Centroid(spectrum) as any;
+      for (let i = 0; i < channelData.length - frameSize; i += hopSize) {
+          const frame = channelData.slice(i, i + frameSize);
+          const f = Meyda.extract(['spectralCentroid', 'rms'], frame);
+          if (!f) continue;
+          const time = i / sampleRate;
+          frameTimes.push(time);
+          rawRms.push(f.rms || 0);
+          rawCentroid.push(f.spectralCentroid || 0);
+          const [frequency, clarity] = detector.findPitch(frame, sampleRate);
 
-        rawRms.push(rms);
-        rawCentroid.push(centroid);
-        frameTimes.push(time);
+        if (frequency && clarity > 0) { // clarity threshold
+          const midi = 69 + 12 * Math.log2(frequency / 440);
+          rawPitchMidi.push(midi);
+          pitchConfs.push(clarity);
+        } else {
+          rawPitchMidi.push(0);
+          pitchConfs.push(clarity);
+        }
+
       }
       const normRms = normalizeFeatureArr(rawRms);
       const normCentroid = normalizeFeatureArr(rawCentroid);
-      console.log(`⏱ Total Frame Analysis Time: ${(performance.now() - framewiseStartTime).toFixed(2)}ms; Number of frames = ${frames.size()}`);
-
-      // ============================
-      //    Align pitch and frame
-      // ============================
-      let pitchIdx = 0;
-      const rawPitchMidi: number[] = [];
-      const rawPitchConf: number[] = [];
-      for (let i = 0; i < frameTimes.length; i++) {
-        const t = frameTimes[i];
-        // advance pitch index
-        while (
-          pitchIdx < pitchTimes.length - 1 &&
-          pitchTimes[pitchIdx] < t
-        ) {
-          pitchIdx++;
-        }
-        const freq = pitchHz[pitchIdx];
-        const conf = pitchConfidence[pitchIdx];
-
-        // --- filter unvoiced ---
-        if (!freq || conf <= 0) {
-          rawPitchMidi.push(0);
-          rawPitchConf.push(conf);
-          continue;
-        }
-        const midi = 69 + 12 * Math.log2(freq / 440);
-        rawPitchMidi.push(midi);
-        rawPitchConf.push(conf);
-      }
+      console.log(`⏱ Total Frame Analysis Time: ${(performance.now() - framewiseStartTime).toFixed(2)}ms;`);
       
       // ============================
       //    BUILD FEATURES TO DRAW
@@ -239,6 +264,7 @@ export function VisualizationWaitingView({
       console.log("Grouping features per note");
       const features: FrameFeatures[] = [];
       let startIdx = -1;
+      const pitchThreshold = 0.8; // MIDI change tolerance
       for (let i = 1; i < rawPitchMidi.length; i++) {
         const pitch = rawPitchMidi[i];
         // start of a pitched segment
@@ -249,7 +275,7 @@ export function VisualizationWaitingView({
         const isEnd =
           startIdx !== -1 &&
           (pitch === 0 ||
-            Math.abs(pitch - rawPitchMidi[startIdx]) > 0.5 ||
+            Math.abs(pitch - rawPitchMidi[startIdx]) > pitchThreshold ||
             i === rawPitchMidi.length - 1);
         
         if (isEnd) {
@@ -264,6 +290,7 @@ export function VisualizationWaitingView({
             time: frameTimes[startIdx],
             duration: frameTimes[i] - frameTimes[startIdx],
             pitch: medPitch,
+            pitchConf: pitchConfs[startIdx],
             rms: avgRms,
             centroid: avgCentroid,
           });
@@ -272,7 +299,18 @@ export function VisualizationWaitingView({
         }
       }
       featuresRef.current = features;
-      console.table(features);
+      // console.table(features);
+
+      // Temporarily only display pitch label for monophonic audio, because there is no good real-time polyphonic audio pitch detection.
+      const longNotes = features.filter(
+        e => e.duration > longNoteDurationThreshold && e.pitch > 0
+      );
+      const lowPitchRatio =
+        longNotes.length > 0
+          ? longNotes.filter(e => e.pitch < lowNoteThreshold).length / longNotes.length
+          : 0;
+      likelyPolyphonic.current = lowPitchRatio > 0.6;
+      if (likelyPolyphonic.current) console.log("⚠️Warning: Pitch detection doesn't work well on polyphonic audio!");
       
       console.log(`🏁 TOTAL ANALYSIS TIME: ${(performance.now() - t0).toFixed(2)}ms`);
       console.log("Analysis complete.");
@@ -385,18 +423,17 @@ export function VisualizationWaitingView({
           Math.floor(maxTrailSteps * progress),
           1
         );
-
+        
+        const trailLengthMultiplier = 0.006; // the larger multiplier, the longer the comet tail
+        const trailR = rBase + (rms - 0.5) * 10;
         for (let j = 0; j < trailSteps; j++) {
           const trailAlpha = Math.max(
             life * (j / trailSteps),
             minAlpha
           );
-
           const trailSize = size * (j / trailSteps) * 0.7;
           const trailGlow = glowSize * (j / trailSteps) * 0.7;
-
-          const trailR = rBase + (rms - 0.5) * 10;
-          const trailAngle = angle + j * 0.005;
+          const trailAngle = angle + j * trailLengthMultiplier;
 
           const x = cx + Math.cos(trailAngle) * trailR;
           const y = cy + Math.sin(trailAngle) * trailR;
@@ -411,6 +448,24 @@ export function VisualizationWaitingView({
             trailAlpha
           );
         }
+
+        // --- LABEL (only for long notes) ---
+        const outwardOffset = 30 + rms * 8; 
+        if (evt.duration > longNoteDurationThreshold && evt.pitch > lowNoteThreshold) {
+          const headX = cx + Math.cos(angle + trailSteps * trailLengthMultiplier) * (trailR + outwardOffset);
+          const headY = cy + Math.sin(angle + trailSteps * trailLengthMultiplier) * (trailR + outwardOffset);
+          const label = `${midiToNoteName(evt.pitch)}`; //  | ${evt.pitchConf.toFixed(2)
+          drawLabel(
+            ctx,
+            headX,
+            headY,
+            label,
+            life,
+            angle,
+            rms
+          );
+          ctx.globalAlpha = 1.0;
+        }
       });
 
       rafRef.current = requestAnimationFrame(draw);
@@ -423,6 +478,7 @@ export function VisualizationWaitingView({
       observer.disconnect();
     };
   }, [isVisible]);
+
 
   return (
     <div
