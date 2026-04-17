@@ -1,10 +1,9 @@
 import React, { useState, useRef } from "react";
 import { renderMidiToAudio } from "./utils/midiToAudio";
 import { analyzeMidiChords } from "./utils/midiChordAnalysis";
-import { MidiVisualizer } from "./components/MidiVisualizer";
 
 export default function AppMidi() {
-  const [segments, setSegments] = useState([]);
+  const [midiBuffer, setMidiBuffer] = useState([]);
   const [audioUrl, setAudioUrl] = useState(null);
   const [loading, setLoading] = useState(false);
   const audioRef = useRef(null);
@@ -14,16 +13,15 @@ export default function AppMidi() {
     if (!file) return;
     setLoading(true);
     const buffer = await file.arrayBuffer();
+    setMidiBuffer(buffer);
     
-    // 1. Analyze Chords for Visualization
-    const chordData = await analyzeMidiChords(buffer);
-    console.log(chordData);
-    setSegments(chordData);
-    // 2. Render to PCM Audio for precision timing
     const url = await renderMidiToAudio(buffer);
+    
+    // analyzeMidiChords(buffer);
     setAudioUrl(url);
     setLoading(false);
   };
+
 
   return (
     <div style={{ width: "98vw", height: "100vh", padding: "2rem", background: "#0b0e14", minHeight: "100vh", color: "white", fontFamily: "sans-serif" }}>
@@ -43,11 +41,6 @@ export default function AppMidi() {
           <div style={{ marginBottom: "1rem", background: "#1a1d23", padding: "1rem", borderRadius: "8px" }}>
              <audio ref={audioRef} src={audioUrl} controls style={{ width: "100%" }} />
           </div>
-          
-          <MidiVisualizer 
-            segments={segments} 
-            audioRef={audioRef} 
-          />
         </div>
       )}
     </div>

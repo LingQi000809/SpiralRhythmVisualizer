@@ -18,17 +18,19 @@ const CHORD_TEMPLATES = {
 // ==========================
 function parseMidiNotes(midiBuffer) {
     const midi = new Midi(midiBuffer);
-    const notes = [];
+    let notes = [];
     midi.tracks.forEach(track => {
         track.notes.forEach(n => {
             notes.push({
                 midi: n.midi,
-                noteOn_sec: n.time,
-                noteOff_sec: n.time + n.duration
+                startTime: n.time,
+                duration: n.duration,
+                velocity: 127
             });
         });
     });
-    return notes.sort((a, b) => a.noteOn_sec - b.noteOn_sec);
+    notes = notes.sort((a, b) => a.noteOn_sec - b.noteOn_sec);
+    return notes;
 }
 
 // ==========================
@@ -100,11 +102,10 @@ function detectChord(allNotes, winStart, winEnd) {
 // ==========================
 // Step 3: Pipeline
 // ==========================
-export function analyzeMidiChords(midiBuffer) {
-    const notes = parseMidiNotes(midiBuffer);
+export function analyzeMidiChords(notes) {
     if (notes.length === 0) return [];
 
-    const endTime = Math.max(...notes.map(n => n.noteOff_sec));
+    const endTime = notes[-1].startTime + notes[-1].duration;
     const results = [];
 
     // Increased window size for stability
