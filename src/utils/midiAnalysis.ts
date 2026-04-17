@@ -95,68 +95,78 @@ function detectChord(
     : { label: "N", finalScore: 0, root: 0, type: "maj" };
 }
 
-export function analyzeMidi(input: InputData) {
-    const notes = input.midiNotes;
-    if (!notes?.length) return [];
+export function analyzeMidi(input: InputData): MidiFeatures[] {
+  const notes = input.midiNotes;
+  if (!notes?.length) return [];
 
-    const windowSize = 0.4;
-    const step = 0.2;
+  // 1. Collect all unique time points (Note On / Note Off)
+  const timePoints = new Set<number>();
+  notes.forEach((n) => {
+    timePoints.add(n.startTime);
+    timePoints.add(n.startTime + n.duration);
+  });
 
-    const results: MidiFeatures[] = [];
+  const sortedTimes = Array.from(timePoints).sort((a, b) => a - b);
+  const rawSegments: MidiFeatures[] = [];
 
-    for (let t = input.inputStartTime; t < input.inputEndTime; t += step) {
-        const winStart = t;
-        const winEnd = t + windowSize;
+  // 2. Initial Segment Creation
+  for (let i = 0; i < sortedTimes.length - 1; i++) {
+    const start = sortedTimes[i];
+    const end = sortedTimes[i + 1];
+    const duration = end - start;
 
-        const activeNotes = notes.filter(
-            (n) =>
-            n.startTime < winEnd &&
-            n.startTime + n.duration > winStart
-        );
+    if (duration <= 0) continue;
 
-        if (!activeNotes.length) continue;
+    const activeNotes = notes.filter(
+      (n) => n.startTime <= start && (n.startTime + n.duration) >= end
+    );
 
-        const bestChord = detectChord(activeNotes, winStart, winEnd);
+    if (!activeNotes.length) continue;
 
-        const chordPcs =
-            bestChord.label === "N"
-            ? []
-            : CHORD_TEMPLATES[bestChord.type].map(
-                (i) => (bestChord.root + i) % 12
-                );
+    const bestChord = detectChord(activeNotes, start, end);
+    const chordPcs = bestChord.label === "N" 
+      ? [] 
+      : CHORD_TEMPLATES[bestChord.type].map((v) => (bestChord.root + v) % 12);
 
-        results.push({
-            startTime: winStart,
-            duration: windowSize,
-            chord: bestChord.label,
-            notes: activeNotes.map((n) => ({
-                ...n,
-                isChordTone: chordPcs.includes(n.pitch % 12),
-            })),
-        });
-    }
+    rawSegments.push({
+      startTime: start,
+      duration: duration,
+      chord: bestChord.label,
+      notes: activeNotes.map((n) => ({
+        ...n,
+        isChordTone: chordPcs.includes(n.pitch % 12),
+      })),
+    });
+  }
 
-    const merged: MidiFeatures[] = [];
+  // 3. Merging & Filtering
+  const merged: MidiFeatures[] = [];
+  const MIN_DURATION = 0.3;
 
-    for (const seg of results) {
+  for (const seg of rawSegments) {
     const last = merged[merged.length - 1];
 
-    if (last && last.chord === seg.chord) {
-        last.duration += seg.duration;
-
-        const combined = [...last.notes, ...seg.notes];
-        const seen = new Set<string>();
-
-        last.notes = combined.filter((n) => {
+    // Merge if same chord OR if current segment is a "micro-segment" (< 0.1s)
+    // Merging micro-segments into the previous one prevents "stuttering"
+    if (last && (last.chord === seg.chord || seg.duration < MIN_DURATION)) {
+      last.duration += seg.duration;
+      
+      // Update notes list
+      const noteIds = new Set(last.notes.map(n => `${n.pitch}-${n.startTime}`));
+      for (const n of seg.notes) {
         const id = `${n.pitch}-${n.startTime}`;
-        if (seen.has(id)) return false;
-        seen.add(id);
-        return true;
-        });
+        if (!noteIds.has(id)) {
+          last.notes.push(n);
+          noteIds.add(id);
+        }
+      }
     } else {
-        merged.push({ ...seg });
+      merged.push({ ...seg });
     }
-    }
+  }
 
-    return merged.filter((s) => s.duration > 1);
+  // 4. Final Cleanup
+  // Remove any remaining segments that are still too short (e.g., at the very start)
+  // or segments where no chord was detected ("N") if you only want harmony.
+  return merged.filter((s) => s.duration >= MIN_DURATION);
 }

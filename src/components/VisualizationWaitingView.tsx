@@ -11,6 +11,121 @@ interface VisualizationWaitingViewProps {
   isVisible?: boolean;
 }
 
+// Nebula puff: a cluster of expanding radial gradients painted on the background
+// canvas whenever a new chord becomes active. Each puff lives for PUFF_LIFETIME ms,
+// expanding outward and fading out. Multiple puffs from successive chords overlap
+// via 'screen' blending to produce a layered, smoky look.
+interface NebulaPuff {
+  hue: number;  // circle-of-fifths hue (0–360)
+  sat: number;  // saturation — lower for minor/dim chords
+  blobs: {
+    ox: number; oy: number; // blob center (canvas px)
+    r0: number;             // initial radius
+    rMax: number;           // max radius at full expansion
+    alpha: number;          // per-blob peak opacity
+  }[];
+  born: number; // performance.now() timestamp at spawn
+}
+
+// Circle-of-fifths hue per pitch class (index = MIDI pitch class 0..11, C..B).
+// Adjacent entries on the circle of fifths are 30° apart so harmonically
+// related chords (e.g. C–G–Am) produce visually neighboring colors.
+const FIFTH_HUE = [
+  212, // C   visible deep cyan-blue (lifted brightness)
+  228, // C#  blue-indigo (brightened)
+  246, // D   violet-blue
+  268, // D#  violet
+  292, // E   saturated purple
+  312, // F   magenta
+  328, // F#  pink
+  345, // G   rose (high visibility)
+  18,  // G#  orange-red (kept bright, not brown)
+  34,  // A   amber (lifted for glow visibility)
+  52,  // A#  yellow (soft but visible)
+  190  // B   cyan-teal (bright return anchor)
+];
+const NOTE_NAMES_PC = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
+
+const PUFF_LIFETIME = 6000;   // ms before a puff is removed
+const PUFF_FADE_START = 0.45; // fraction of lifetime at which fade begins
+
+function chordRootHue(chord: string): number {
+  if (!chord || chord === "N") return 200;
+  // Match longest note name first to avoid "C#" being parsed as "C"
+  const pc = NOTE_NAMES_PC.findIndex(n => chord.startsWith(n));
+  return pc >= 0 ? FIFTH_HUE[pc] : 200;
+}
+
+function spawnNebulaPuff(
+  chord: string,
+  puffs: NebulaPuff[],
+  w: number,
+  h: number
+) {
+  const hue = chordRootHue(chord);
+  const isMinor = /min|dim|m7/.test(chord);
+  const baseAlpha = isMinor ? 0.055 : 0.07;
+  const sat = isMinor ? 45 : 60;
+
+  // Function to get a corner-weighted coordinate
+  const edgeWeight = (size: number) => {
+    const push = Math.pow(Math.random(), 1.5); // 1.5 is a "gentle" push to edges
+    const pos = Math.random() > 0.5 ? push : 1 - push;
+    return size * pos;
+  };
+
+  const cx = edgeWeight(w);
+  const cy = edgeWeight(h);
+
+  const numBlobs = 4 + Math.floor(Math.random() * 4);
+  const blobs = Array.from({ length: numBlobs }, () => ({
+    ox: cx + (Math.random() - 0.5) * w * 0.2, // Reduced spread slightly to keep clusters distinct
+    oy: cy + (Math.random() - 0.5) * h * 0.2,
+    r0: 40 + Math.random() * 60,
+    rMax: 120 + Math.random() * 140,
+    alpha: baseAlpha * (0.6 + Math.random() * 0.8),
+  }));
+
+  puffs.push({ hue, sat, blobs, born: performance.now() });
+}
+
+function drawNebulaLayer(
+  ctx: CanvasRenderingContext2D,
+  puffs: NebulaPuff[],
+  w: number,
+  h: number,
+  now: number
+) {
+  ctx.clearRect(0, 0, w, h);
+  for (let i = puffs.length - 1; i >= 0; i--) {
+    const p = puffs[i];
+    const age = now - p.born;
+    if (age > PUFF_LIFETIME) { puffs.splice(i, 1); continue; }
+
+    const progress = age / PUFF_LIFETIME;
+    const alpha = progress > PUFF_FADE_START
+      ? 1 - (progress - PUFF_FADE_START) / (1 - PUFF_FADE_START)
+      : 1;
+
+    for (const b of p.blobs) {
+      // Radius expands quickly early (progress * 2 clamped to 1) then holds
+      const r = b.r0 + (b.rMax - b.r0) * Math.min(progress * 2, 1);
+      const grad = ctx.createRadialGradient(b.ox, b.oy, 0, b.ox, b.oy, r);
+      const a = b.alpha * alpha;
+      grad.addColorStop(0,   `hsla(${p.hue},${p.sat}%,55%,${a})`);
+      grad.addColorStop(0.4, `hsla(${p.hue},${p.sat}%,45%,${a * 0.5})`);
+      grad.addColorStop(1,   `hsla(${p.hue},${p.sat}%,35%,0)`);
+      // 'screen' blend lets puffs stack additively without blowing out to white
+      ctx.globalCompositeOperation = 'screen';
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(b.ox, b.oy, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  ctx.globalCompositeOperation = 'source-over';
+}
+
 export function VisualizationWaitingView({
   concatenatedAudioUrl,
   audioRef,
@@ -18,11 +133,14 @@ export function VisualizationWaitingView({
   isVisible = true,
 }: VisualizationWaitingViewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const nebulaCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
   const frameFeaturesRef = useRef<FrameFeatures[]>([]);
   const midiFeaturesRef = useRef<MidiFeatures[]>([]);
   const durationRef = useRef<number>(0);
   const rafRef = useRef<number | null>(null);
+  const nebulaPuffsRef = useRef<NebulaPuff[]>([]);
+  const lastActiveChordRef = useRef<string>("");
 
   // --- EFFECT 1: OFFLINE ANALYSIS ---
   useEffect(() => {
@@ -201,6 +319,13 @@ export function VisualizationWaitingView({
 
       ctx.setTransform(1, 0, 0, 1, 0, 0); // reset first
       ctx.scale(dpr, dpr);
+
+      // Keep nebula canvas in sync with the main canvas dimensions
+      const nebula = nebulaCanvasRef.current;
+      if (nebula) {
+        nebula.width = Math.round(rect.width * dpr);
+        nebula.height = Math.round(rect.height * dpr);
+      }
     };
 
     resize();
@@ -226,6 +351,15 @@ export function VisualizationWaitingView({
       const baseRadius = Math.min(w, h) * 0.2;
       const totalDuration = durationRef.current;
       const orbitDuration = Math.min(totalDuration, 10); // seconds per orbit
+
+      // --- Nebula layer (drawn behind everything else) ---
+      const nebulaCanvas = nebulaCanvasRef.current;
+      if (nebulaCanvas) {
+        const nCtx = nebulaCanvas.getContext("2d");
+        if (nCtx) {
+          drawNebulaLayer(nCtx, nebulaPuffsRef.current, w, h, performance.now());
+        }
+      }
 
       ctx.clearRect(0, 0, w, h);
 
@@ -283,17 +417,26 @@ export function VisualizationWaitingView({
         });
       });
 
+      // Spawn a nebula puff whenever the active chord changes
+      if (activeChord && activeChord !== "N" && activeChord !== lastActiveChordRef.current) {
+        lastActiveChordRef.current = activeChord;
+        spawnNebulaPuff(activeChord, nebulaPuffsRef.current, w, h);
+      }
+
       if (activeChord && activeChord !== "N") {
-        drawLabel(
+        // Get the visual properties for the current chord
+        const currentHue = chordRootHue(activeChord);
+        const isMinor = /min|dim|m7/.test(activeChord);
+        const currentSat = isMinor ? 45 : 60;
+
+        drawChordLabel(
           ctx,
           cx,
           cy,
           activeChord,
-          1,          // always visible when active
-          0,          // no angular offset
-          1           // full strength
+          currentHue,
+          currentSat
         );
-        ctx.globalAlpha = 1.0;
       }
 
       rafRef.current = requestAnimationFrame(draw);
@@ -323,6 +466,11 @@ export function VisualizationWaitingView({
         position: 'relative',
       }}
     >
+      {/* Nebula canvas sits behind the main canvas. Both fill the container. */}
+      <canvas
+        ref={nebulaCanvasRef}
+        style={{ width: '100%', height: '100%', maxHeight: '80vh', position: 'absolute', top: 0, left: 0 }}
+      />
       <canvas
         ref={canvasRef}
         style={{ width: '100%', height: '100%', maxHeight: '80vh', position: 'relative' }}
@@ -534,6 +682,62 @@ function drawLabel(
   ctx.textBaseline = "middle";
 
   ctx.fillText(text, lx, ly);
+}
+function drawChordLabel(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  text: string,
+  hue: number,
+  sat: number
+) {
+  const now = performance.now();
+  // Smoother, slower breathing pulse
+  const pulse = 1 + Math.sin(now * 0.0012) * 0.04;
+  
+  ctx.save();
+  ctx.translate(cx, cy);
+  ctx.scale(pulse, pulse);
+
+  // 1. THE "VOLUMETRIC" UNDERGLOW 
+  // Large, very soft radial gradient that simulates light hitting distant gas.
+  const bgGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, 100);
+  bgGrad.addColorStop(0, `hsla(${hue}, ${sat}%, 50%, 0.18)`);
+  bgGrad.addColorStop(1, `hsla(${hue}, ${sat}%, 50%, 0)`);
+  ctx.fillStyle = bgGrad;
+  ctx.beginPath();
+  ctx.arc(0, 0, 100, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 2. THE CHROMATIC BLOOM
+  // We use 'screen' blending to make the glow additive (brighter) 
+  ctx.globalCompositeOperation = 'screen';
+  ctx.shadowBlur = 15;
+  ctx.shadowColor = `hsla(${hue}, ${sat}%, 65%, 0.6)`;
+  
+  // 3. THE CORE TEXT STYLING
+  ctx.font = "bold 24px 'Outfit', 'Inter', sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+
+  // Gradient that goes from pure white to a pale tint of the chord's color
+  const textGrad = ctx.createLinearGradient(0, -20, 0, 20);
+  textGrad.addColorStop(0, "#ffffff");
+  textGrad.addColorStop(0.5, "#ffffff");
+  textGrad.addColorStop(1, `hsla(${hue}, ${sat}%, 90%, 1)`);
+  
+  ctx.fillStyle = textGrad;
+  
+  // Draw the text (this captures the shadowBlur bloom)
+  ctx.fillText(text, 0, 0);
+
+  // 4. THE LIGHT "STRIKE"
+  // Draw it one more time with NO shadow and slightly thinner to create a sharp "hot" core
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = "rgba(255, 255, 255, 0.9)";
+  ctx.fillText(text, 0, 0);
+
+  ctx.restore();
 }
 
 function visualizeNote(

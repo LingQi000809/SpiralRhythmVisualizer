@@ -30,3 +30,4 @@ export interface InputData {
   audioUrl: string // audio URL 
   midiNotes?: MidiNote[] // if the input is MIDI, also include its midi notes
 }
+
