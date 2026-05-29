@@ -1,130 +1,33 @@
+// ============================================================
+// SYNCED WITH: Hearmi-Frontend/app/studio/components/VisualizationWaitingView.tsx
+// Only difference: import paths point to local utils/.
+// Keep logic in sync with the Hearmi repo.
+// ============================================================
+
 import { useEffect, useRef, useState } from 'react';
 import Meyda from "meyda";
 import { PitchDetector } from "pitchy";
-import { FrameFeatures, MidiFeatures, InputData, MidiNote } from '../types';
-import { analyzeMidi } from '../utils/midiAnalysis';
+import type { InputData, MidiFeatures, NebulaPuff } from '../utils/visMidiHelpers';
+import { analyzeMidi, chordRootHue, spawnNebulaPuff, drawNebulaLayer } from '../utils/visMidiHelpers';
+
+export interface FrameFeatures {
+  time: number;        // seconds
+  duration: number;    // seconds (per note segment)
+  pitch: number;       // MIDI
+  pitchConf: number;   // confidence about pitch
+  rms: number;         // 0-1 normalized
+  centroid: number;    // 0-1 normalized
+  flux?: number;
+}
 
 interface VisualizationWaitingViewProps {
-  concatenatedAudioUrl: string | null;
+  concatenatedAudioUrl: string | null; // URL to the concatenated audio
   audioRef: React.RefObject<HTMLAudioElement | null>;
-  inputs: InputData[] | null;
+  inputs: InputData[] | null; // list of InputData objects with optional MIDI notes per input
   isVisible?: boolean;
 }
 
-// Nebula puff: a cluster of expanding radial gradients painted on the background
-// canvas whenever a new chord becomes active. Each puff lives for PUFF_LIFETIME ms,
-// expanding outward and fading out. Multiple puffs from successive chords overlap
-// via 'screen' blending to produce a layered, smoky look.
-interface NebulaPuff {
-  hue: number;  // circle-of-fifths hue (0–360)
-  sat: number;  // saturation — lower for minor/dim chords
-  blobs: {
-    ox: number; oy: number; // blob center (canvas px)
-    r0: number;             // initial radius
-    rMax: number;           // max radius at full expansion
-    alpha: number;          // per-blob peak opacity
-  }[];
-  born: number; // performance.now() timestamp at spawn
-}
-
-// Circle-of-fifths hue per pitch class (index = MIDI pitch class 0..11, C..B).
-// Adjacent entries on the circle of fifths are 30° apart so harmonically
-// related chords (e.g. C–G–Am) produce visually neighboring colors.
-const FIFTH_HUE = [
-  212, // C   visible deep cyan-blue (lifted brightness)
-  228, // C#  blue-indigo (brightened)
-  246, // D   violet-blue
-  268, // D#  violet
-  292, // E   saturated purple
-  312, // F   magenta
-  328, // F#  pink
-  345, // G   rose (high visibility)
-  18,  // G#  orange-red (kept bright, not brown)
-  34,  // A   amber (lifted for glow visibility)
-  52,  // A#  yellow (soft but visible)
-  190  // B   cyan-teal (bright return anchor)
-];
-const NOTE_NAMES_PC = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
-
-const PUFF_LIFETIME = 6000;   // ms before a puff is removed
-const PUFF_FADE_START = 0.45; // fraction of lifetime at which fade begins
-
-function chordRootHue(chord: string): number {
-  if (!chord || chord === "N") return 200;
-  // Match longest note name first to avoid "C#" being parsed as "C"
-  const pc = NOTE_NAMES_PC.findIndex(n => chord.startsWith(n));
-  return pc >= 0 ? FIFTH_HUE[pc] : 200;
-}
-
-function spawnNebulaPuff(
-  chord: string,
-  puffs: NebulaPuff[],
-  w: number,
-  h: number
-) {
-  const hue = chordRootHue(chord);
-  const isMinor = /min|dim|m7/.test(chord);
-  const baseAlpha = isMinor ? 0.055 : 0.07;
-  const sat = isMinor ? 45 : 60;
-
-  // Function to get a corner-weighted coordinate
-  const edgeWeight = (size: number) => {
-    const push = Math.pow(Math.random(), 1.5); // 1.5 is a "gentle" push to edges
-    const pos = Math.random() > 0.5 ? push : 1 - push;
-    return size * pos;
-  };
-
-  const cx = edgeWeight(w);
-  const cy = edgeWeight(h);
-
-  const numBlobs = 4 + Math.floor(Math.random() * 4);
-  const blobs = Array.from({ length: numBlobs }, () => ({
-    ox: cx + (Math.random() - 0.5) * w * 0.2, // Reduced spread slightly to keep clusters distinct
-    oy: cy + (Math.random() - 0.5) * h * 0.2,
-    r0: 40 + Math.random() * 60,
-    rMax: 120 + Math.random() * 140,
-    alpha: baseAlpha * (0.6 + Math.random() * 0.8),
-  }));
-
-  puffs.push({ hue, sat, blobs, born: performance.now() });
-}
-
-function drawNebulaLayer(
-  ctx: CanvasRenderingContext2D,
-  puffs: NebulaPuff[],
-  w: number,
-  h: number,
-  now: number
-) {
-  ctx.clearRect(0, 0, w, h);
-  for (let i = puffs.length - 1; i >= 0; i--) {
-    const p = puffs[i];
-    const age = now - p.born;
-    if (age > PUFF_LIFETIME) { puffs.splice(i, 1); continue; }
-
-    const progress = age / PUFF_LIFETIME;
-    const alpha = progress > PUFF_FADE_START
-      ? 1 - (progress - PUFF_FADE_START) / (1 - PUFF_FADE_START)
-      : 1;
-
-    for (const b of p.blobs) {
-      // Radius expands quickly early (progress * 2 clamped to 1) then holds
-      const r = b.r0 + (b.rMax - b.r0) * Math.min(progress * 2, 1);
-      const grad = ctx.createRadialGradient(b.ox, b.oy, 0, b.ox, b.oy, r);
-      const a = b.alpha * alpha;
-      grad.addColorStop(0,   `hsla(${p.hue},${p.sat}%,55%,${a})`);
-      grad.addColorStop(0.4, `hsla(${p.hue},${p.sat}%,45%,${a * 0.5})`);
-      grad.addColorStop(1,   `hsla(${p.hue},${p.sat}%,35%,0)`);
-      // 'screen' blend lets puffs stack additively without blowing out to white
-      ctx.globalCompositeOperation = 'screen';
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(b.ox, b.oy, r, 0, Math.PI * 2);
-      ctx.fill();
-    }
-  }
-  ctx.globalCompositeOperation = 'source-over';
-}
+const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 
 export function VisualizationWaitingView({
   concatenatedAudioUrl,
@@ -133,62 +36,90 @@ export function VisualizationWaitingView({
   isVisible = true,
 }: VisualizationWaitingViewProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const nebulaCanvasRef = useRef<HTMLCanvasElement | null>(null);
+
   const audioContextRef = useRef<AudioContext | null>(null);
   const frameFeaturesRef = useRef<FrameFeatures[]>([]);
   const midiFeaturesRef = useRef<MidiFeatures[]>([]);
   const durationRef = useRef<number>(0);
   const rafRef = useRef<number | null>(null);
+
+  const nebulaCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const nebulaPuffsRef = useRef<NebulaPuff[]>([]);
   const lastActiveChordRef = useRef<string>("");
 
+  const [statusText, setStatusText] = useState('Preparing visualization...');
+
   // --- EFFECT 1: OFFLINE ANALYSIS ---
   useEffect(() => {
-    console.log("Running 1st useEffect...");
-    if (!concatenatedAudioUrl || !audioRef.current || !inputs) return;
+    if (!concatenatedAudioUrl || !inputs) {
+      frameFeaturesRef.current = [];
+      midiFeaturesRef.current = [];
+      durationRef.current = 0;
+      setStatusText('Preparing MIDI preview...');
+      return;
+    }
 
-    const runAudioAnalysis = async (input: InputData) => {
-      console.log("Running audio analysis...")
+    let cancelled = false;
+    let localAudioContext: AudioContext | null = null;
+
+    // We don't use a ref to prevent overlap, instead we rely on `cancelled`
+    // If this effect re-runs, the previous promise's cancellation will
+    // stop it from committing to state, and this new run will do the actual analysis.
+
+
+    const runAudioAnalysis = async (input: InputData, fullBuffer: AudioBuffer) => {
       // Start total timer
       const t0 = performance.now();
+      const sampleRate = fullBuffer.sampleRate;
 
-      // Measure Fetch/Decode
-      const tFetch = performance.now();
-      const response = await fetch(input.audioUrl);
-      const arrayBuffer = await response.arrayBuffer();
-      const audioBuffer = await audioContextRef.current!.decodeAudioData(arrayBuffer);
+      // Slice the relevant sample range out of the full buffer
+      const startSample = Math.floor(input.inputStartTime * sampleRate);
+      const endSample = Math.min(
+        Math.ceil(input.inputEndTime * sampleRate),
+        fullBuffer.length
+      );
+      const segmentLength = endSample - startSample;
+      if (segmentLength <= 0) return;
 
-      const sampleRate = audioBuffer.sampleRate;
+      // Copy channel 0 samples for the segment only
+      const fullChannelData = fullBuffer.getChannelData(0);
+      const channelData = fullChannelData.subarray(startSample, endSample);
       const frameSize = 2048;
-      const hopSize = 512;
-      const channelData = audioBuffer.getChannelData(0);
+      const hopSize = Math.max(512, Math.floor(sampleRate / 20));
+
+      if (cancelled) return;
+
       Meyda.sampleRate = sampleRate;
       Meyda.bufferSize = frameSize;
-      console.log(`⏱ Decode Time: ${(performance.now() - tFetch).toFixed(2)}ms`);
+      console.log(`⏱ Decode Time: ${(performance.now() - t0).toFixed(2)}ms`);
 
       const detector = PitchDetector.forFloat32Array(frameSize);
-      
+
       // ===================
       //     FRAME-WISE
-      //  RMS, Centroid 
+      //  RMS, Centroid
       // ===================
       const rawRms: number[] = [];
       const rawCentroid: number[] = [];
       const rawPitchMidi: number[] = [];
       const pitchConfs: number[] = [];
       const frameTimes: number[] = [];
-      
+
       console.log("Analyzing frame-wise spectral features and rms...");
       const framewiseStartTime = performance.now();
       for (let i = 0; i < channelData.length - frameSize; i += hopSize) {
-          const frame = channelData.slice(i, i + frameSize);
-          const f = Meyda.extract(['spectralCentroid', 'rms'], frame);
-          if (!f) continue;
-          const time = i / sampleRate;
-          frameTimes.push(time);
-          rawRms.push(f.rms || 0);
-          rawCentroid.push(f.spectralCentroid || 0);
-          const [frequency, clarity] = detector.findPitch(frame, sampleRate);
+        const frame = channelData.slice(i, i + frameSize);
+        const f = Meyda.extract(['spectralCentroid', 'rms'], frame);
+        if (!f) continue;
+
+        // Local time within segment → shift to global timeline position
+        const localTime = i / sampleRate;
+        const globalTime = localTime + input.inputStartTime;
+        frameTimes.push(globalTime);
+
+        rawRms.push(f.rms || 0);
+        rawCentroid.push(f.spectralCentroid || 0);
+        const [frequency, clarity] = detector.findPitch(frame, sampleRate);
 
         if (frequency && clarity > 0) { // clarity threshold
           const midi = 69 + 12 * Math.log2(frequency / 440);
@@ -199,11 +130,16 @@ export function VisualizationWaitingView({
           pitchConfs.push(clarity);
         }
 
+        // Yield to main thread every 50 frames to prevent browser UI freeze
+        if (rawRms.length % 50 === 0) {
+          await new Promise(r => setTimeout(r, 0));
+        }
       }
       const normRms = normalizeFeatureArr(rawRms);
       const normCentroid = normalizeFeatureArr(rawCentroid);
+      if (cancelled) return;
       console.log(`⏱ Total Frame Analysis Time: ${(performance.now() - framewiseStartTime).toFixed(2)}ms;`);
-      
+
       // ============================
       //    BUILD FEATURES TO DRAW
       // ============================
@@ -214,16 +150,15 @@ export function VisualizationWaitingView({
       for (let i = 1; i < rawPitchMidi.length; i++) {
         const pitch = rawPitchMidi[i];
         // start of a pitched segment
-        if (pitch > 0 && startIdx === -1) {
-          startIdx = i;
-        }
+        if (pitch > 0 && startIdx === -1) startIdx = i;
+
         // end of segment
         const isEnd =
           startIdx !== -1 &&
           (pitch === 0 ||
             Math.abs(pitch - rawPitchMidi[startIdx]) > pitchThreshold ||
             i === rawPitchMidi.length - 1);
-        
+
         if (isEnd) {
           const segmentRms = normRms.slice(startIdx, i + 1);
           const segmentCentroid = normCentroid.slice(startIdx, i + 1);
@@ -233,7 +168,7 @@ export function VisualizationWaitingView({
           const medPitch = medianPitch(segmentPitch);
 
           features.push({
-            time: input.inputStartTime + frameTimes[startIdx],
+            time: frameTimes[startIdx],
             duration: frameTimes[i] - frameTimes[startIdx],
             pitch: medPitch,
             pitchConf: pitchConfs[startIdx],
@@ -244,87 +179,159 @@ export function VisualizationWaitingView({
           startIdx = pitch > 0 ? i : -1;
         }
       }
+
+      // Fallback: Some MIDI/polyphonic content can fail monophonic pitch segmentation,
+      // resulting in zero features (blank visualization) even though audio exists.
+      // Build lightweight energy-based events from framewise data so users always
+      // get visual feedback while generation runs.
+      if (features.length === 0 && frameTimes.length > 0) {
+        const step = 8; // downsample to keep rendering lightweight
+        const frameDuration = hopSize / sampleRate;
+
+        for (let i = 0; i < frameTimes.length; i += step) {
+          const rms = normRms[i] ?? 0;
+          const centroid = normCentroid[i] ?? 0;
+          const detectedPitch = rawPitchMidi[i] ?? 0;
+
+          // Use detected pitch when available; otherwise derive a stable pseudo-pitch
+          // from centroid so radial mapping still varies musically.
+          const fallbackPitch = detectedPitch > 0
+            ? detectedPitch
+            : 48 + centroid * 24;
+
+          features.push({
+            time: frameTimes[i],
+            duration: Math.max(frameDuration * step, 0.06),
+            pitch: fallbackPitch,
+            pitchConf: pitchConfs[i] ?? 0,
+            rms,
+            centroid,
+          });
+        }
+
+        console.log('[VisualizationWaitingView] Using energy fallback visualization frames:', features.length);
+      }
+
+      if (cancelled) return;
+
       console.log(`🏁 TOTAL ANALYSIS TIME: ${(performance.now() - t0).toFixed(2)}ms`);
       console.log("Analysis complete.");
-     
       frameFeaturesRef.current = frameFeaturesRef.current.concat(features);
     };
 
     const runMidiAnalysis = async (input: InputData) => {
-      console.log("Running MIDI analysis...")
-      const midiFeatures = analyzeMidi(input);
-      console.log(midiFeatures);
+      // MIDI note startTimes from Studio.tsx are relative to the segment (start = 0).
+      // Shift them to the global concatenated timeline here.
+      const shiftedInput: InputData = {
+        ...input,
+        midiNotes: input.midiNotes?.map(note => ({
+          ...note,
+          startTime: note.startTime + input.inputStartTime,
+        })),
+      };
+      const midiFeatures = analyzeMidi(shiftedInput);
       midiFeaturesRef.current = midiFeaturesRef.current.concat(midiFeatures);
+      if (cancelled) return;
     }
 
-    const run = async () => {
-      let audioInputs: InputData[] = [];
-      let midiInputs: InputData[] = [];
+    const runAnalysis = async () => {
+      try {
+        setStatusText('Analyzing input audio and MIDI...');
+        const arrayBuffer = await (async () => {
+          const response = await fetch(concatenatedAudioUrl);
+          if (!response.ok) {
+            throw new Error(`Failed to fetch waiting audio (${response.status})`);
+          }
+          return response.arrayBuffer();
+        })();
+        if (cancelled) return;
 
-      inputs.forEach(input => {
-        const inputMidi = input.midiNotes;
-        const isMidi = Array.isArray(inputMidi) && inputMidi.length > 0;
+        // Use offline context for faster decoding without playback overhead if supported
+        // or just standard decoding block
+        localAudioContext = new (window.AudioContext || (window as any).webkitAudioContext)();
+        audioContextRef.current = localAudioContext;
 
-        if (isMidi) {
-          inputMidi.forEach(note => {
-            note.startTime += input.inputStartTime;
-          });
-          midiInputs.push(input);
-        } else {
-          audioInputs.push(input);
+        let fullBuffer: AudioBuffer;
+        try {
+          fullBuffer = await localAudioContext.decodeAudioData(arrayBuffer);
+        } catch (e) {
+          throw new Error('Failed to decode audio data: ' + e);
         }
-      });
+        if (cancelled) return;
 
-      console.log("Audio Inputs: ", audioInputs, "; MIDI Inputs: ", midiInputs);
+        durationRef.current = fullBuffer.duration;
 
-      if (!audioContextRef.current) {
-        audioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        let audioInputs: InputData[] = [];
+        let midiInputs: InputData[] = [];
+        inputs.forEach(input => {
+          const isMidi =
+            Array.isArray(input.midiNotes) && input.midiNotes.length > 0;
+          if (isMidi) {
+            midiInputs.push(input);
+          } else {
+            audioInputs.push(input);
+          }
+        });
+
+        // Run audio segment analyses (each gets the already-decoded fullBuffer)
+        await Promise.all(audioInputs.map(inp => runAudioAnalysis(inp, fullBuffer)));
+        await Promise.all(midiInputs.map(runMidiAnalysis));
+
+        setStatusText('');
+      } catch (error) {
+        if (!cancelled) {
+          console.error('[VisualizationWaitingView] Analysis failed:', error);
+          setStatusText('Unable to analyze preview audio');
+        }
       }
+    }
 
-      const ctx = audioContextRef.current;
-      // decode concatenated audio first
-      const response = await fetch(concatenatedAudioUrl);
-      const arrayBuffer = await response.arrayBuffer();
-      const audioBuffer = await ctx.decodeAudioData(arrayBuffer);
-      durationRef.current = audioBuffer.duration;
+    void runAnalysis();
 
-      await Promise.all(audioInputs.map(runAudioAnalysis));
-      await Promise.all(midiInputs.map(runMidiAnalysis));
-
-      console.log("midiFeaturesRef", midiFeaturesRef);
+    return () => {
+      cancelled = true;
+      if (audioContextRef.current) {
+        void audioContextRef.current.close().catch(() => {});
+        audioContextRef.current = null;
+      }
+      if (localAudioContext && localAudioContext !== audioContextRef.current) {
+        void localAudioContext.close().catch(() => {});
+      }
     };
-
-    run();
-  }, [concatenatedAudioUrl]);
+  }, [concatenatedAudioUrl, inputs]);
 
   // --- EFFECT 2: RENDER LOOP ---
   useEffect(() => {
-    console.log("Running 2nd useEffect...")
     if (!isVisible || !canvasRef.current) return;
-    console.log("Drawing...")
-
     const canvas = canvasRef.current;
-    const ctx = canvas.getContext("2d")!;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
 
     // --- Window Resizing Observer ---
     const resize = () => {
       const canvas = canvasRef.current;
-      if (!canvas) return;
+      const nebula = nebulaCanvasRef.current;
+      if (!canvas || !nebula) return;
 
       const dpr = window.devicePixelRatio || 1;
       const rect = canvas.getBoundingClientRect();
 
+      // Update Main Canvas
       canvas.width = Math.round(rect.width * dpr);
       canvas.height = Math.round(rect.height * dpr);
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.scale(dpr, dpr);
+      }
 
-      ctx.setTransform(1, 0, 0, 1, 0, 0); // reset first
-      ctx.scale(dpr, dpr);
-
-      // Keep nebula canvas in sync with the main canvas dimensions
-      const nebula = nebulaCanvasRef.current;
-      if (nebula) {
-        nebula.width = Math.round(rect.width * dpr);
-        nebula.height = Math.round(rect.height * dpr);
+      // Update Nebula Canvas
+      nebula.width = Math.round(rect.width * dpr);
+      nebula.height = Math.round(rect.height * dpr);
+      const nCtx = nebula.getContext("2d");
+      if (nCtx) {
+        nCtx.setTransform(1, 0, 0, 1, 0, 0);
+        nCtx.scale(dpr, dpr);
       }
     };
 
@@ -332,12 +339,12 @@ export function VisualizationWaitingView({
     const observer = new ResizeObserver(() => {
       resize();
     });
-    observer.observe(canvasRef.current!);
+    observer.observe(canvas);
 
     // --- Animation Loop ---
     const draw = () => {
       const audio = audioRef.current;
-      if (!audio || !frameFeaturesRef.current.length) {
+      if (!audio || (!frameFeaturesRef.current.length && !midiFeaturesRef.current.length)) {
         rafRef.current = requestAnimationFrame(draw);
         return;
       }
@@ -357,7 +364,7 @@ export function VisualizationWaitingView({
       if (nebulaCanvas) {
         const nCtx = nebulaCanvas.getContext("2d");
         if (nCtx) {
-          drawNebulaLayer(nCtx, nebulaPuffsRef.current, w, h, performance.now());
+          drawNebulaLayer(nCtx, nebulaPuffsRef.current, performance.now());
         }
       }
 
@@ -376,9 +383,9 @@ export function VisualizationWaitingView({
         const size = 10 + rms * 10;
         const glowSize = size * 2 + rms * 10;
         visualizeNote(
-          ctx, 
-          dt, t, 
-          evt.time, evt.duration, evt.pitch, rms, 
+          ctx,
+          dt, t,
+          evt.time, evt.duration, evt.pitch, rms,
           cx, cy, baseRadius, color, size, glowSize,
           orbitDuration
         )
@@ -411,7 +418,7 @@ export function VisualizationWaitingView({
             dt, t,
             note.startTime, note.duration, note.pitch, strength,
             cx, cy, baseRadius, color, size, glowSize,
-            orbitDuration, 
+            orbitDuration,
             true
           );
         });
@@ -442,6 +449,7 @@ export function VisualizationWaitingView({
       rafRef.current = requestAnimationFrame(draw);
     }
 
+
     rafRef.current = requestAnimationFrame(draw);
 
     return () => {
@@ -458,7 +466,7 @@ export function VisualizationWaitingView({
         flex: 1,
         minHeight: '200px',
         width: '100%',
-        height: '100%', 
+        height: '100%',
         maxHeight: '100vh',
         borderRadius: '8px',
         border: '1px solid rgba(255, 255, 255, 0.1)',
@@ -466,7 +474,6 @@ export function VisualizationWaitingView({
         position: 'relative',
       }}
     >
-      {/* Nebula canvas sits behind the main canvas. Both fill the container. */}
       <canvas
         ref={nebulaCanvasRef}
         style={{ width: '100%', height: '100%', maxHeight: '80vh', position: 'absolute', top: 0, left: 0 }}
@@ -475,6 +482,24 @@ export function VisualizationWaitingView({
         ref={canvasRef}
         style={{ width: '100%', height: '100%', maxHeight: '80vh', position: 'relative' }}
       />
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          pointerEvents: 'none',
+          color: 'rgba(234, 234, 234, 0.7)',
+          fontSize: '13px',
+          fontFamily: 'Inter, sans-serif',
+          letterSpacing: '0.01em',
+          textAlign: 'center',
+          padding: '0 16px',
+        }}
+      >
+        {statusText}
+      </div>
     </div>
   );
 }
@@ -568,7 +593,6 @@ function midiToNoteName(midi: number): string {
   ];
 
   const pitchClass = Math.round(midi) % 12;
-  // const octave = Math.floor(midi / 12) - 1;
 
   return `${noteNames[pitchClass]}`;
 }
@@ -601,7 +625,7 @@ function getMidiGalaxyColor(
   const v = clamp01(velocity / 127);
   // shared galaxy motion (very small, slow)
   const drift = Math.sin(time * 0.08 + pitch * 0.03) * 5;
-  // stable per-pitch variation 
+  // stable per-pitch variation
   const pitchJitter = pitchHash(pitch);
   const light = 38 + v * 32;
   return isChordTone
@@ -694,12 +718,12 @@ function drawChordLabel(
   const now = performance.now();
   // Smoother, slower breathing pulse
   const pulse = 1 + Math.sin(now * 0.0012) * 0.04;
-  
+
   ctx.save();
   ctx.translate(cx, cy);
   ctx.scale(pulse, pulse);
 
-  // 1. THE "VOLUMETRIC" UNDERGLOW 
+  // 1. THE "VOLUMETRIC" UNDERGLOW
   // Large, very soft radial gradient that simulates light hitting distant gas.
   const bgGrad = ctx.createRadialGradient(0, 0, 0, 0, 0, 100);
   bgGrad.addColorStop(0, `hsla(${hue}, ${sat}%, 50%, 0.18)`);
@@ -710,11 +734,11 @@ function drawChordLabel(
   ctx.fill();
 
   // 2. THE CHROMATIC BLOOM
-  // We use 'screen' blending to make the glow additive (brighter) 
+  // We use 'screen' blending to make the glow additive (brighter)
   ctx.globalCompositeOperation = 'screen';
   ctx.shadowBlur = 15;
   ctx.shadowColor = `hsla(${hue}, ${sat}%, 65%, 0.6)`;
-  
+
   // 3. THE CORE TEXT STYLING
   ctx.font = "bold 24px 'Outfit', 'Inter', sans-serif";
   ctx.textAlign = "center";
@@ -725,9 +749,9 @@ function drawChordLabel(
   textGrad.addColorStop(0, "#ffffff");
   textGrad.addColorStop(0.5, "#ffffff");
   textGrad.addColorStop(1, `hsla(${hue}, ${sat}%, 90%, 1)`);
-  
+
   ctx.fillStyle = textGrad;
-  
+
   // Draw the text (this captures the shadowBlur bloom)
   ctx.fillText(text, 0, 0);
 
@@ -743,7 +767,7 @@ function drawChordLabel(
 function visualizeNote(
   ctx: CanvasRenderingContext2D,
   dt: number, audioTime: number,
-  startTime: number, duration: number, pitch: number, strength: number, 
+  startTime: number, duration: number, pitch: number, strength: number,
   cx: number, cy: number, baseRadius: number, color: string, size: number, glowSize: number,
   orbitDuration: number,
   isMidi = false
@@ -793,7 +817,7 @@ function visualizeNote(
     Math.floor(maxTrailSteps * progress),
     1
   );
-  
+
   const trailLengthMultiplier = 0.006; // the larger multiplier, the longer the comet tail
   const trailR = rBase + (strength - 0.5) * 10;
 
@@ -827,7 +851,7 @@ function visualizeNote(
   if (duration > longNoteDurationThreshold && pitch > lowNoteThreshold) {
     const baseAngle = angle + trailSteps * trailLengthMultiplier;
     // inner notes lead more, outer notes lead less (distance along motion)
-    const radialFactor = Math.max(0, 1 - (trailR / (baseRadius * 2))); 
+    const radialFactor = Math.max(0, 1 - (trailR / (baseRadius * 2)));
     // 1 = inner, 0 = outer
     const lead = (8 + strength * 14) * radialFactor;
     // forward motion along orbit
@@ -836,7 +860,7 @@ function visualizeNote(
     const headX = cx + Math.cos(futureAngle) * trailR;
     const headY = cy + Math.sin(futureAngle) * trailR;
 
-    const label = `${midiToNoteName(pitch)}`; //  | ${evt.pitchConf.toFixed(2)
+    const label = `${midiToNoteName(pitch)}`;
     drawLabel(
       ctx,
       headX,
