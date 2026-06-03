@@ -3,13 +3,16 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
 import Meyda from 'meyda';
 import { PitchDetector } from 'pitchy';
+import {
+  type FrameFeatures,
+  normalizeFeatureArr,
+  medianPitch,
+  mapPitch,
+  getGalaxyColor,
+  drawFeatureNote,
+} from '../utils/visDrawHelpers';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-
-interface FrameFeatures {
-  time: number; duration: number; pitch: number;
-  pitchConf: number; rms: number; centroid: number;
-}
 
 interface SimilarityMatch {
   inputStart: number; inputEnd: number;
@@ -23,7 +26,7 @@ type Phase = 'idle' | 'input' | 'transitioning' | 'output';
 const SIMILARITY_MATCHES: SimilarityMatch[] = [
   { inputStart: 2.0,  inputEnd: 4.0,  outputStart: 0.0,  outputEnd: 1.0,  label: 'Motif A', rgb: [255, 140, 80] },
   { inputStart: 2.0,  inputEnd: 4.0,  outputStart: 4.0,  outputEnd: 5.0,  label: 'Motif A', rgb: [255, 140, 80] },
-  { inputStart: 7.0,  inputEnd: 9.0, outputStart: 12.0, outputEnd: 16.0, label: 'Motif B', rgb: [80, 220, 170]  },
+  { inputStart: 7.0,  inputEnd: 9.0,  outputStart: 12.0, outputEnd: 16.0, label: 'Motif B', rgb: [80, 220, 170] },
 ];
 
 const TRANSITION_MS      = 2800;
@@ -31,26 +34,9 @@ const OUTPUT_READY_DELAY = 10;
 
 // ─── Audio analysis ───────────────────────────────────────────────────────────
 
-function normalizeArr(arr: number[], log = true, eps = 1e-6): number[] {
-  if (!arr.length) return [];
-  const vals = log ? arr.map(v => Math.log1p(v)) : [...arr];
-  const sorted = [...vals].sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length * 0.5)];
-  const q1 = sorted[Math.floor(sorted.length * 0.25)];
-  const q3 = sorted[Math.floor(sorted.length * 0.75)];
-  const iqr = Math.max(q3 - q1, eps);
-  const n = vals.map(v => (v - median) / (2 * iqr));
-  const mn = Math.min(...n), mx = Math.max(...n);
-  if (Math.abs(mx - mn) < eps) return n.map(() => 0.5);
-  return n.map(v => Math.pow((v - mn) / (mx - mn), 0.9));
+function avgOf(arr: number[]): number {
+  return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
 }
-function medianOf(arr: number[]): number {
-  const v = arr.filter(p => p > 0).sort((a, b) => a - b);
-  if (!v.length) return 0;
-  const m = Math.floor(v.length / 2);
-  return v.length % 2 === 0 ? (v[m - 1] + v[m]) / 2 : v[m];
-}
-function avgOf(arr: number[]): number { return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0; }
 
 async function analyzeFile(
   url: string,
@@ -86,7 +72,7 @@ async function analyzeFile(
       if (isCancelled()) return;
     }
 
-    const nRms = normalizeArr(rawRms), nC = normalizeArr(rawC);
+    const nRms = normalizeFeatureArr(rawRms), nC = normalizeFeatureArr(rawC);
     const feats: FrameFeatures[] = [];
     let si = -1;
     for (let i = 1; i < rawP.length; i++) {
@@ -96,7 +82,7 @@ async function analyzeFile(
       if (end) {
         feats.push({
           time: times[si], duration: times[i] - times[si],
-          pitch: medianOf(rawP.slice(si, i + 1)), pitchConf: confs[si],
+          pitch: medianPitch(rawP.slice(si, i + 1)), pitchConf: confs[si],
           rms: avgOf(nRms.slice(si, i + 1)), centroid: avgOf(nC.slice(si, i + 1)),
         });
         si = p > 0 ? i : -1;
@@ -107,8 +93,10 @@ async function analyzeFile(
       const fd = hopSize / sr;
       for (let i = 0; i < times.length; i += 8) {
         const r = nRms[i] ?? 0, c = nC[i] ?? 0, p = rawP[i] ?? 0;
-        feats.push({ time: times[i], duration: Math.max(fd * 8, 0.06),
-          pitch: p > 0 ? p : 48 + c * 24, pitchConf: confs[i] ?? 0, rms: r, centroid: c });
+        feats.push({
+          time: times[i], duration: Math.max(fd * 8, 0.06),
+          pitch: p > 0 ? p : 48 + c * 24, pitchConf: confs[i] ?? 0, rms: r, centroid: c,
+        });
       }
     }
     if (!isCancelled()) onDone(feats, full.duration);
@@ -121,104 +109,18 @@ function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
 function easeIn3(t: number) { return t * t * t; }
 function easeOut3(t: number) { return 1 - Math.pow(1 - t, 3); }
 
-function mapPitch(pitch: number): number {
-  if (pitch <= 0) return 0;
-  const x = Math.min(1, Math.max(0, (pitch - 20) / 70));
-  const sig = (t: number) => 1 / (1 + Math.exp(-5 * (t - 0.5)));
-  return (sig(x) - sig(0)) / (sig(1) - sig(0));
-}
-
-function galaxyColor(rms: number, centroid: number): string {
-  return `hsla(${220 + centroid * 80},${40 + centroid * 40}%,${50 + centroid * 20}%,${0.3 + rms * 0.5})`;
-}
-
-// Pitch spread: min 0.5×baseR (low pitch), max 2.5×baseR (high pitch).
-// Keeps all notes visibly away from the center so the black hole region is clear.
-function noteRadius(pn: number, baseR: number): number {
-  return baseR * (0.5 + pn * 2.0);
-}
-
-function orbitalPos(startTime: number, audioTime: number, pitch: number,
-  orbitDur: number, baseR: number, cx: number, cy: number) {
+// Compute the live orbital position of a feature event — used for puff anchoring.
+// Uses the same radius formula as visualizeNote so puff positions track the spiral correctly.
+function orbitalPos(
+  startTime: number, audioTime: number, pitch: number,
+  orbitDur: number, baseR: number, cx: number, cy: number
+) {
   const pn = mapPitch(pitch);
-  const r = noteRadius(pn, baseR);
+  const r = baseR + (pn - 0.5) * baseR * 2.5; // same as production visualizeNote
   const oi = Math.floor(startTime / orbitDur);
   const op = (startTime - oi * orbitDur) / orbitDur;
   const angle = op * Math.PI * 2 + oi * 0.3 + audioTime * 0.1;
   return { x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r, angle, r };
-}
-
-function drawDot(ctx: CanvasRenderingContext2D, x: number, y: number,
-  size: number, glow: number, color: string, alpha: number) {
-  if (size <= 0 || alpha <= 0) return;
-  ctx.globalAlpha = alpha * 0.45;
-  ctx.fillStyle = color;
-  ctx.beginPath(); ctx.arc(x, y, glow, 0, Math.PI * 2); ctx.fill();
-  ctx.globalAlpha = alpha;
-  ctx.fillStyle = color;
-  ctx.beginPath(); ctx.arc(x, y, size, 0, Math.PI * 2); ctx.fill();
-}
-
-function midiToNoteName(midi: number): string {
-  if (!midi || midi <= 0) return '';
-  const names = ['C','C#','D','D#','E','F','F#','G','G#','A','A#','B'];
-  return names[Math.round(midi) % 12];
-}
-
-function drawNoteLabel(ctx: CanvasRenderingContext2D, x: number, y: number, text: string, life: number) {
-  if (life < 0.08 || !text) return;
-  ctx.globalAlpha = life * 0.65;
-  ctx.fillStyle = 'rgba(255,255,255,0.85)';
-  ctx.font = '13px sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(text, x, y);
-}
-
-// Full comet trail + pitch label — consistent with VisualizationWaitingView
-function drawNote(ctx: CanvasRenderingContext2D, evt: FrameFeatures, audioT: number,
-  cx: number, cy: number, baseR: number, orbitDur: number, alphaScale = 1) {
-  const dt = audioT - evt.time;
-  const fadeTime = 0.7;
-  let life = dt < 0 ? 0
-    : dt <= evt.duration ? 1
-    : dt <= evt.duration + fadeTime ? 1 - (dt - evt.duration) / fadeTime
-    : 0.015;
-  if (life === 0) return;
-
-  const pn = mapPitch(evt.pitch);
-  const r = noteRadius(pn, baseR);
-  const trailR = r + (evt.rms - 0.5) * 10;
-  const oi = Math.floor(evt.time / orbitDur);
-  const op = (evt.time - oi * orbitDur) / orbitDur;
-  const angle = op * Math.PI * 2 + oi * 0.3 + audioT * 0.1;
-
-  const progress = Math.min(dt / evt.duration, 1);
-  const steps = Math.max(Math.floor(Math.max(Math.floor(evt.duration * 100), 1) * progress), 1);
-  const color = galaxyColor(evt.rms, evt.centroid);
-  const size  = 10 + evt.rms * 10;
-  const glow  = size * 2 + evt.rms * 10;
-
-  for (let j = 0; j < steps; j++) {
-    const ta = angle + j * 0.006;
-    drawDot(ctx, cx + Math.cos(ta) * trailR, cy + Math.sin(ta) * trailR,
-      size * (j / steps) * 0.7, glow * (j / steps) * 0.7, color,
-      Math.max(life * (j / steps), 0.015) * alphaScale);
-  }
-
-  // Pitch label: place just beyond the comet head, radially outward
-  if (evt.duration > 0.2 && evt.pitch > 47) {
-    const headAngle = angle + steps * 0.006;
-    const labelR = trailR + 18 + evt.rms * 8;
-    drawNoteLabel(
-      ctx,
-      cx + Math.cos(headAngle) * labelR,
-      cy + Math.sin(headAngle) * labelR,
-      midiToNoteName(evt.pitch),
-      life * alphaScale
-    );
-  }
-  ctx.globalAlpha = 1;
 }
 
 // Spanning glow — one soft blob per output onset in the match window.
@@ -278,9 +180,9 @@ export default function ComparisonPage() {
   const [inputFileName,  setInputFileName]  = useState('');
   const [outputFileName, setOutputFileName] = useState('');
 
-  const [phase,         setPhase]         = useState<Phase>('idle');
-  const [countdown,     setCountdown]     = useState(OUTPUT_READY_DELAY);
-  const [selectedMatch, setSelectedMatch] = useState<SimilarityMatch | null>(null);
+  const [phase,          setPhase]          = useState<Phase>('idle');
+  const [countdown,      setCountdown]      = useState(OUTPUT_READY_DELAY);
+  const [selectedMatch,  setSelectedMatch]  = useState<SimilarityMatch | null>(null);
   const [playingSnippet, setPlayingSnippet] = useState<'input' | 'output' | null>(null);
 
   // Output audio player state
@@ -300,8 +202,6 @@ export default function ComparisonPage() {
   const playingSnippetRef  = useRef<'input' | 'output' | null>(null);
   const snippetTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Snapshot: positions of every input feature at the moment transition starts
-  const snapshotRef      = useRef<Array<{ x: number; y: number; rms: number; centroid: number }>>([]);
   const snapshotTakenRef = useRef(false);
   const lastPhaseRef     = useRef<Phase>('idle');
 
@@ -392,7 +292,6 @@ export default function ComparisonPage() {
           setPhase('transitioning');
           transitionStartRef.current = performance.now();
           setTimeout(() => {
-            // Input fades; output begins
             inputAudioRef.current?.pause();
             setPhase('output');
             const out = outputAudioRef.current;
@@ -424,7 +323,10 @@ export default function ComparisonPage() {
     const ro = new ResizeObserver(resize);
     ro.observe(canvas);
 
-    type Particle = { match: SimilarityMatch; spawnTime: number; anchorIdx: number; windowIndices: number[]; duration: number };
+    type Particle = {
+      match: SimilarityMatch; spawnTime: number;
+      anchorIdx: number; windowIndices: number[]; duration: number;
+    };
     const particles: Particle[] = [];
     const spawned = new Set<number>();
 
@@ -437,11 +339,9 @@ export default function ComparisonPage() {
       const baseR = Math.min(w, h) * 0.2;
       const now = performance.now();
 
-      // Reset snapshot when leaving/entering transition
       if (p !== lastPhaseRef.current) {
         if (p !== 'transitioning') {
           snapshotTakenRef.current = false;
-          snapshotRef.current = [];
         }
         if (p === 'input') {
           particles.length = 0;
@@ -464,7 +364,7 @@ export default function ComparisonPage() {
 
       // ── input: normal spiral ─────────────────────────────────────────────
       if (p === 'input') {
-        inF.forEach(evt => drawNote(ctx, evt, inT, cx, cy, baseR, inOrb));
+        inF.forEach(evt => drawFeatureNote(ctx, evt, inT, cx, cy, baseR, inOrb));
       }
 
       // ── transitioning: whole spiral scales toward center ─────────────────
@@ -472,38 +372,41 @@ export default function ComparisonPage() {
         const progress = Math.min((now - transitionStartRef.current) / TRANSITION_MS, 1);
         const eased = easeIn3(progress);
         const effectiveBaseR = baseR * (1 - eased);
-        inF.forEach(evt => drawNote(ctx, evt, inT, cx, cy, effectiveBaseR, inOrb, lerp(1, 0, eased)));
+        inF.forEach(evt =>
+          drawFeatureNote(ctx, evt, inT, cx, cy, effectiveBaseR, inOrb, lerp(1, 0, eased))
+        );
       }
 
       // ── output: ghost cloud + output spiral + similarity puffs ───────────
       else if (p === 'output') {
-        // Ghost cloud — semi-transparent input particles drifting at center
+        // Ghost cloud — semi-transparent input particles drifting near center
         inF.forEach((evt, i) => {
           const a  = (i / Math.max(inF.length, 1)) * Math.PI * 2;
           const dr = Math.sin(now * 0.0003 + i * 0.7) * 0.35;
           const rr = 10 + (i % 9) * 3.5 + Math.sin(now * 0.0005 + i) * 4;
           ctx.globalAlpha = 0.04 + evt.rms * 0.07;
-          ctx.fillStyle = galaxyColor(evt.rms, evt.centroid);
+          ctx.fillStyle = getGalaxyColor(evt.rms, evt.centroid);
           ctx.beginPath(); ctx.arc(cx + Math.cos(a + dr) * rr, cy + Math.sin(a + dr) * rr,
             2 + evt.rms * 2, 0, Math.PI * 2); ctx.fill();
         });
         ctx.globalAlpha = 1;
 
         // Output spiral
-        outF.forEach(evt => drawNote(ctx, evt, outT, cx, cy, baseR, outOrb));
+        outF.forEach(evt => drawFeatureNote(ctx, evt, outT, cx, cy, baseR, outOrb));
 
         // Spawn connection particles when similarity timestamps fire
         SIMILARITY_MATCHES.forEach((match, idx) => {
           if (outT >= match.outputStart && !spawned.has(idx)) {
             spawned.add(idx);
-            // All output features inside [outputStart, outputEnd]
             const windowIndices: number[] = [];
             outF.forEach((f, fi) => {
               if (f.time >= match.outputStart && f.time <= match.outputEnd) windowIndices.push(fi);
             });
-            // Anchor: closest feature to outputStart (fly-in target)
             let anchorIdx = -1, bestD = Infinity;
-            outF.forEach((f, fi) => { const d = Math.abs(f.time - match.outputStart); if (d < bestD) { bestD = d; anchorIdx = fi; } });
+            outF.forEach((f, fi) => {
+              const d = Math.abs(f.time - match.outputStart);
+              if (d < bestD) { bestD = d; anchorIdx = fi; }
+            });
             if (!windowIndices.length && anchorIdx >= 0) windowIndices.push(anchorIdx);
             particles.push({ match, spawnTime: now, anchorIdx, windowIndices, duration: 1300 });
           }
@@ -514,7 +417,6 @@ export default function ComparisonPage() {
         particles.forEach(particle => {
           const progress = Math.min((now - particle.spawnTime) / particle.duration, 1);
           const anchorEvt = outF[particle.anchorIdx];
-          // Anchor always tracks live outT — the cloud keeps rotating with the spiral
           const anchorPos = anchorEvt
             ? orbitalPos(anchorEvt.time, outT, anchorEvt.pitch, outOrb, baseR, cx, cy)
             : { x: cx + 80, y: cy };
@@ -526,12 +428,13 @@ export default function ComparisonPage() {
               const te = easeOut3(tp);
               ctx.globalAlpha = (0.85 - t * 0.08) * (1 - progress * 0.15);
               ctx.fillStyle = `rgba(${r},${g},${b},1)`;
-              ctx.beginPath(); ctx.arc(lerp(cx, anchorPos.x, te), lerp(cy, anchorPos.y, te),
-                Math.max(10 - t, 1) * 0.8, 0, Math.PI * 2); ctx.fill();
+              ctx.beginPath(); ctx.arc(
+                lerp(cx, anchorPos.x, te), lerp(cy, anchorPos.y, te),
+                Math.max(10 - t, 1) * 0.8, 0, Math.PI * 2
+              ); ctx.fill();
             }
             ctx.globalAlpha = 1;
           } else {
-            // Live positions for every onset in the output window
             const windowPositions = particle.windowIndices.map(i => {
               const f = outF[i];
               return f ? orbitalPos(f.time, outT, f.pitch, outOrb, baseR, cx, cy) : anchorPos;
@@ -578,7 +481,6 @@ export default function ComparisonPage() {
 
   // ── Snippet playback — toggles pause if already playing that type ──────────
   const playSnippet = useCallback((type: 'input' | 'output') => {
-    // Toggle: if this type is already playing, pause it
     if (playingSnippetRef.current === type) {
       if (snippetTimerRef.current) clearTimeout(snippetTimerRef.current);
       (type === 'input' ? inputAudioRef : outputAudioRef).current?.pause();
@@ -605,7 +507,7 @@ export default function ComparisonPage() {
         setPlayingSnippet(null);
       }, (end - start) * 1000);
     }
-  }, []);   // uses refs only — no stale-closure risk
+  }, []);
 
   const closePanel = useCallback(() => {
     if (snippetTimerRef.current) clearTimeout(snippetTimerRef.current);
@@ -628,7 +530,6 @@ export default function ComparisonPage() {
     setSelectedMatch(null); setPlayingSnippet(null);
   }, []);
 
-  // Pointer-based seek — supports click AND drag with setPointerCapture
   const seekPointer = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
     const rect = e.currentTarget.getBoundingClientRect();
     const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
@@ -653,8 +554,8 @@ export default function ComparisonPage() {
   return (
     <div style={s.page}>
       {/* Hidden audio elements */}
-      <audio ref={inputAudioRef}  src={inputUrl ?? undefined}   style={{ display: 'none' }} />
-      <audio ref={outputAudioRef} src={effectiveOutputSrc}      style={{ display: 'none' }} />
+      <audio ref={inputAudioRef}  src={inputUrl ?? undefined}  style={{ display: 'none' }} />
+      <audio ref={outputAudioRef} src={effectiveOutputSrc}     style={{ display: 'none' }} />
 
       {/* Upload row */}
       <div style={s.row}>
@@ -687,7 +588,6 @@ export default function ComparisonPage() {
           onClick={handleCanvasClick}
           onMouseMove={handleCanvasMouseMove}
         />
-
         {selectedMatch && (
           <SnippetPanel
             match={selectedMatch}
@@ -704,8 +604,6 @@ export default function ComparisonPage() {
           <button style={s.playerBtn} onClick={toggleOutput} title={outPlaying ? 'Pause' : 'Play'}>
             {outPlaying ? '⏸' : '▶'}
           </button>
-
-          {/* Progress track — large pointer-capture target for easy dragging */}
           <div
             style={s.trackOuter}
             onPointerDown={handleTrackPointerDown}
@@ -716,7 +614,6 @@ export default function ComparisonPage() {
               <div style={{ ...s.trackThumb, left: `${pct}%` }} />
             </div>
           </div>
-
           <span style={s.playerTime}>{fmt(outTime)} / {fmt(outDur)}</span>
           <button style={s.playerBtn} onClick={replayOutput} title="Replay from start">↺</button>
         </div>
@@ -744,9 +641,7 @@ function SnippetPanel({ match, playing, onPlay, onClose }: {
         <span style={{ ...s.panelTitle, color: accent }}>{match.label}</span>
         <button style={s.panelClose} onClick={onClose} title="Close">✕</button>
       </div>
-
       <p style={s.panelSub}>Play each snippet to hear the similarity</p>
-
       <div style={s.snippetRow}>
         <SnippetButton
           label="Input" start={match.inputStart} end={match.inputEnd}
@@ -759,7 +654,6 @@ function SnippetPanel({ match, playing, onPlay, onClose }: {
           onClick={() => onPlay('output')}
         />
       </div>
-
       <button style={s.resumeBtn} onClick={onClose}>Resume output playback</button>
     </div>
   );
@@ -826,7 +720,6 @@ const s: Record<string, React.CSSProperties> = {
   canvasWrap:  { flex: 1, minHeight: 0, borderRadius: '10px', border: '1px solid rgba(255,255,255,0.07)', overflow: 'hidden', background: '#0d0d0d', position: 'relative' },
   canvas:      { width: '100%', height: '100%', display: 'block', transition: 'filter 0.4s ease' },
 
-  // Snippet panel
   panel:       { position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', width: '300px', background: 'rgba(14,14,20,0.97)', borderRadius: '14px', border: '1px solid rgba(255,255,255,0.1)', padding: '22px 22px 18px', display: 'flex', flexDirection: 'column', gap: '14px', backdropFilter: 'blur(20px)', boxShadow: '0 28px 70px rgba(0,0,0,0.75)' },
   panelHeader: { display: 'flex', alignItems: 'center', gap: '10px' },
   panelDot:    { width: '10px', height: '10px', borderRadius: '50%', flexShrink: 0 },
@@ -842,11 +735,9 @@ const s: Record<string, React.CSSProperties> = {
 
   resumeBtn:   { background: 'rgba(255,255,255,0.06)', border: '1px solid rgba(255,255,255,0.09)', color: 'rgba(255,255,255,0.5)', borderRadius: '7px', padding: '9px', fontSize: '12px', cursor: 'pointer', fontFamily: 'inherit', width: '100%' },
 
-  // Output player bar
   playerBar:   { display: 'flex', alignItems: 'center', gap: '10px', padding: '9px 14px', background: 'rgba(255,255,255,0.04)', borderRadius: '8px', flexShrink: 0 },
   playerBtn:   { background: 'transparent', border: 'none', color: 'rgba(255,255,255,0.65)', cursor: 'pointer', fontSize: '16px', padding: '2px 4px', fontFamily: 'inherit', lineHeight: 1, flexShrink: 0 },
 
-  // Track: tall outer div = large drag target; thin inner div = visual bar
   trackOuter:  { flex: 1, height: '20px', display: 'flex', alignItems: 'center', cursor: 'pointer' },
   trackInner:  { width: '100%', height: '4px', background: 'rgba(255,255,255,0.12)', borderRadius: '2px', position: 'relative', overflow: 'visible' },
   trackFill:   { height: '100%', background: 'rgba(255,255,255,0.5)', borderRadius: '2px', pointerEvents: 'none' },
