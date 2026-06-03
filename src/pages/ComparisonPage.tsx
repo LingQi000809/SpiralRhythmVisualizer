@@ -323,12 +323,8 @@ export default function ComparisonPage() {
     const ro = new ResizeObserver(resize);
     ro.observe(canvas);
 
-    type Particle = {
-      match: SimilarityMatch; spawnTime: number;
-      anchorIdx: number; windowIndices: number[]; duration: number;
-    };
-    const particles: Particle[] = [];
-    const spawned = new Set<number>();
+    type MatchState = { anchorIdx: number; windowIndices: number[]; spawnTime: number };
+    const matchStates: (MatchState | null)[] = SIMILARITY_MATCHES.map(() => null);
 
     let rafId: number;
 
@@ -343,9 +339,9 @@ export default function ComparisonPage() {
         if (p !== 'transitioning') {
           snapshotTakenRef.current = false;
         }
-        if (p === 'input') {
-          particles.length = 0;
-          spawned.clear();
+        if (p !== 'output') {
+          matchStates.fill(null);
+          puffPositionsRef.current = [];
         }
         lastPhaseRef.current = p;
       }
@@ -394,10 +390,17 @@ export default function ComparisonPage() {
         // Output spiral
         outF.forEach(evt => drawFeatureNote(ctx, evt, outT, cx, cy, baseR, outOrb));
 
-        // Spawn connection particles when similarity timestamps fire
+        // Per-match: fly-in + settled puff, driven by outT so scrubbing resets them
+        const newPuffs: typeof puffPositionsRef.current = [];
         SIMILARITY_MATCHES.forEach((match, idx) => {
-          if (outT >= match.outputStart && !spawned.has(idx)) {
-            spawned.add(idx);
+          if (outT < match.outputStart) {
+            // Scrubbed back — clear so fly-in replays next time outT crosses threshold
+            matchStates[idx] = null;
+            return;
+          }
+
+          if (matchStates[idx] === null) {
+            // First frame past trigger — compute anchor/window and record wall-clock start
             const windowIndices: number[] = [];
             outF.forEach((f, fi) => {
               if (f.time >= match.outputStart && f.time <= match.outputEnd) windowIndices.push(fi);
@@ -408,21 +411,18 @@ export default function ComparisonPage() {
               if (d < bestD) { bestD = d; anchorIdx = fi; }
             });
             if (!windowIndices.length && anchorIdx >= 0) windowIndices.push(anchorIdx);
-            particles.push({ match, spawnTime: now, anchorIdx, windowIndices, duration: 1300 });
+            matchStates[idx] = { anchorIdx, windowIndices, spawnTime: now };
           }
-        });
 
-        // Draw particles + settled puffs
-        const newPuffs: typeof puffPositionsRef.current = [];
-        particles.forEach(particle => {
-          const progress = Math.min((now - particle.spawnTime) / particle.duration, 1);
-          const anchorEvt = outF[particle.anchorIdx];
+          const state = matchStates[idx]!;
+          const progress = Math.min((now - state.spawnTime) / 1300, 1);
+          const anchorEvt = outF[state.anchorIdx];
           const anchorPos = anchorEvt
             ? orbitalPos(anchorEvt.time, outT, anchorEvt.pitch, outOrb, baseR, cx, cy)
             : { x: cx + 80, y: cy };
 
           if (progress < 1) {
-            const [r, g, b] = particle.match.rgb;
+            const [r, g, b] = match.rgb;
             for (let t = 0; t < 10; t++) {
               const tp = Math.max(0, progress - t * 0.018);
               const te = easeOut3(tp);
@@ -435,13 +435,13 @@ export default function ComparisonPage() {
             }
             ctx.globalAlpha = 1;
           } else {
-            const windowPositions = particle.windowIndices.map(i => {
+            const windowPositions = state.windowIndices.map((i: number) => {
               const f = outF[i];
               return f ? orbitalPos(f.time, outT, f.pitch, outOrb, baseR, cx, cy) : anchorPos;
             });
-            const isSel = sel?.label === particle.match.label;
-            drawSpanningPuff(ctx, windowPositions, anchorPos, particle.match, now, isSel);
-            for (const pos of windowPositions) newPuffs.push({ x: pos.x, y: pos.y, match: particle.match });
+            const isSel = sel?.label === match.label;
+            drawSpanningPuff(ctx, windowPositions, anchorPos, match, now, isSel);
+            for (const pos of windowPositions) newPuffs.push({ x: pos.x, y: pos.y, match });
           }
         });
         puffPositionsRef.current = newPuffs;

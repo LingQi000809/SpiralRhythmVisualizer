@@ -254,8 +254,8 @@ export function visualizeNote(
     const headX = cx + Math.cos(futureAngle) * trailR;
     const headY = cy + Math.sin(futureAngle) * trailR;
     drawLabel(ctx, headX, headY, `${midiToNoteName(pitch)}`, life, angle, strength);
-    ctx.globalAlpha = 1.0;
   }
+  ctx.globalAlpha = 1.0;
 }
 
 // Ergonomic wrapper for drawing a FrameFeatures event.
