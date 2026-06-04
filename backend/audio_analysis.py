@@ -4,10 +4,11 @@ from fastapi.responses import JSONResponse
 
 import numpy as np
 import librosa
+import soundfile as sf
 import io
+import base64
 import tempfile
 import subprocess
-
 
 from sklearn.cluster import KMeans
 
@@ -233,3 +234,111 @@ async def analyze(file: UploadFile = File(...)):
     y, sr = librosa.load(wav_path, sr=None)
     data = extract_voice_features(y, sr)
     return data
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# /process  —  Stem separation + feature extraction for StemVisualizationView.
+#
+# Uses Demucs (python -m demucs) for 4-stem separation, matching production.
+# Install: pip install demucs
+#
+# Response shape matches VisualizationData in Hearmi-Frontend/app/utils/api.ts
+# exactly so the frontend can be migrated without changes.
+# The `pos` field is a lightweight placeholder [time*0.5, rms*5, centroid*3];
+# StemVisualizationView ignores pos and uses stemAudioUris for pitch analysis.
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+
+def _extract_stem_frames(y: np.ndarray, sr: int, stem_name: str) -> list:
+    """Extract per-onset VizFrames for one stem signal."""
+    if y is None or len(y) == 0:
+        return []
+    hop = 512
+    rms      = librosa.feature.rms(y=y, hop_length=hop)[0]
+    centroid = librosa.feature.spectral_centroid(y=y, sr=sr, hop_length=hop)[0]
+    times    = librosa.frames_to_time(np.arange(len(rms)), sr=sr, hop_length=hop)
+
+    rms_n = normalize_array(rms)
+    cen_n = normalize_array(centroid)
+
+    onset_frames = librosa.onset.onset_detect(y=y, sr=sr, hop_length=hop, backtrack=True)
+    frames = []
+    for fi in onset_frames:
+        idx = min(int(fi), len(times) - 1)
+        t, r, c = float(times[idx]), float(rms_n[idx]), float(cen_n[idx])
+        frames.append({
+            "pos":      [round(t * 0.5, 4), round(r * 5, 4), round(c * 3, 4)],
+            "rms":      round(r, 4),
+            "centroid": round(c, 4),
+            "time":     round(t, 4),
+            "stem":     stem_name,
+        })
+    return frames
+
+
+@app.post("/process")
+async def process_visualization(audio: UploadFile = File(...)):
+    """
+    4-stem separation with Demucs + per-stem feature extraction.
+    Requires: pip install demucs
+    """
+    try:
+        # Save upload to a temp WAV file
+        contents = await audio.read()
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_in:
+            tmp_in.write(contents)
+            in_path = tmp_in.name
+
+        y_mix, sr = librosa.load(in_path, sr=None, mono=True)
+        duration = float(len(y_mix) / sr)
+
+        # --mp3 tells Demucs to encode output stems with ffmpeg instead of torchaudio,
+        # avoiding the TorchCodec dependency in recent torchaudio versions.
+        # The input format doesn't matter — we always pass a temp WAV to Demucs.
+        import pathlib
+        with tempfile.TemporaryDirectory() as out_dir:
+            result = subprocess.run(
+                ["python", "-m", "demucs", "-n", "htdemucs", "--mp3", "--out", out_dir, in_path],
+                capture_output=True, text=True, timeout=600
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"Demucs failed: {result.stderr[-500:]}")
+
+            # Demucs nests output: <out_dir>/<model>/<track_name>/<stem>.mp3
+            stem_files = {p.stem: str(p) for p in pathlib.Path(out_dir).rglob("*.mp3")}
+            if not stem_files:
+                raise RuntimeError("Demucs produced no output files")
+
+            all_frames: list = []
+            stem_audio_uris: dict = {}
+
+            for stem_name in ["drums", "bass", "vocals", "other"]:
+                path = stem_files.get(stem_name)
+                if not path:
+                    continue
+                y_stem, _ = librosa.load(path, sr=sr, mono=True)
+                all_frames.extend(_extract_stem_frames(y_stem, sr, stem_name))
+                # Encode the mp3 bytes directly — no WAV re-encode needed
+                with open(path, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("ascii")
+                stem_audio_uris[stem_name] = f"data:audio/mpeg;base64,{b64}"
+
+        all_frames.sort(key=lambda f: f["time"])
+
+        return {
+            "frames":             all_frames,
+            "duration":           round(duration, 3),
+            "chords":             [],
+            "key":                {"key_name": "Unknown", "key_root": 0, "key_mode": "major"},
+            "songStructure":      [],
+            "flamingoChords":     [],
+            "vocalMelodyContour": [],
+            "bassRootContour":    [],
+            "audioDataUri":       "",
+            "stemAudioUris":      stem_audio_uris,
+        }
+
+    except Exception as e:
+        print(f"[/process] error: {e}")
+        return JSONResponse(status_code=400, content={"error": str(e)})

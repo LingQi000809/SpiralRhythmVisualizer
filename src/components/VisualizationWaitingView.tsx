@@ -24,16 +24,21 @@ import {
 
 export type { FrameFeatures };
 
+interface SuckInState { isActive: boolean; startTime: number; durationMs: number; }
+
 interface VisualizationWaitingViewProps {
   concatenatedAudioUrl: string | null;
   audioRef: React.RefObject<HTMLAudioElement | null>;
   inputs: InputData[] | null;
   isVisible?: boolean;
+  // Experiment-only: parent mutates this ref to trigger the suck-to-center canvas animation.
+  suckInRef?: React.RefObject<SuckInState>;
 }
 
 export function VisualizationWaitingView({
   concatenatedAudioUrl,
   audioRef,
+  suckInRef,
   inputs,
   isVisible = true,
 }: VisualizationWaitingViewProps) {
@@ -347,6 +352,18 @@ export function VisualizationWaitingView({
       const totalDuration = durationRef.current;
       const orbitDuration = Math.min(totalDuration, 10);
 
+      // Suck-to-center: shrink orbital radius and fade alpha using the same
+      // easeIn3 curve as ComparisonPage's 'transitioning' phase.
+      const suck = suckInRef?.current;
+      let effectiveBaseR = baseRadius;
+      let suckAlpha = 1;
+      if (suck?.isActive) {
+        const p = Math.min((performance.now() - suck.startTime) / suck.durationMs, 1);
+        const e = p * p * p; // easeIn3
+        effectiveBaseR = baseRadius * (1 - e);
+        suckAlpha = 1 - e;
+      }
+
       // --- Nebula layer (drawn behind everything else) ---
       const nebulaCanvas = nebulaCanvasRef.current;
       if (nebulaCanvas) {
@@ -371,8 +388,10 @@ export function VisualizationWaitingView({
           ctx,
           dt, t,
           evt.time, evt.duration, evt.pitch, rms,
-          cx, cy, baseRadius, color, size, glowSize,
-          orbitDuration
+          cx, cy, effectiveBaseR, color, size, glowSize,
+          orbitDuration,
+          false,
+          suckAlpha
         );
       });
 
@@ -394,9 +413,10 @@ export function VisualizationWaitingView({
             ctx,
             dt, t,
             note.startTime, note.duration, note.pitch, strength,
-            cx, cy, baseRadius, color, size, glowSize,
+            cx, cy, effectiveBaseR, color, size, glowSize,
             orbitDuration,
-            true
+            true,
+            suckAlpha
           );
         });
       });
@@ -407,7 +427,8 @@ export function VisualizationWaitingView({
         spawnNebulaPuff(activeChord, nebulaPuffsRef.current, w, h);
       }
 
-      if (activeChord && activeChord !== 'N') {
+      // Hide chord label during suck — it stays at center and looks wrong
+      if (suckAlpha > 0.05 && activeChord && activeChord !== 'N') {
         const currentHue = chordRootHue(activeChord);
         const isMinor = /min|dim|m7/.test(activeChord);
         const currentSat = isMinor ? 45 : 60;

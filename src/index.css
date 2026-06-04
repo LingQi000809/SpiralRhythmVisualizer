@@ -55,6 +55,11 @@ button:focus-visible {
     outline: 4px auto -webkit-focus-ring-color;
 }
 
+@keyframes shimmer {
+  0%   { background-position: -200% center; }
+  100% { background-position:  200% center; }
+}
+
 @media (prefers-color-scheme: light) {
      :root {
         color: #213547;

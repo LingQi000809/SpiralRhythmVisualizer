@@ -1,15 +1,12 @@
 // LOCAL DEV SCAFFOLDING — POC for input-output visualization comparison.
 
 import { useRef, useState, useCallback, useEffect } from 'react';
-import Meyda from 'meyda';
-import { PitchDetector } from 'pitchy';
 import {
   type FrameFeatures,
-  normalizeFeatureArr,
-  medianPitch,
   mapPitch,
   getGalaxyColor,
   drawFeatureNote,
+  analyzeAudioUrl,
 } from '../utils/visDrawHelpers';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -33,75 +30,7 @@ const TRANSITION_MS      = 2800;
 const OUTPUT_READY_DELAY = 10;
 
 // ─── Audio analysis ───────────────────────────────────────────────────────────
-
-function avgOf(arr: number[]): number {
-  return arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
-}
-
-async function analyzeFile(
-  url: string,
-  onDone: (features: FrameFeatures[], dur: number) => void,
-  isCancelled: () => boolean
-) {
-  try {
-    const buf = await (await fetch(url)).arrayBuffer();
-    if (isCancelled()) return;
-    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
-    const full = await audioCtx.decodeAudioData(buf);
-    void audioCtx.close();
-    if (isCancelled()) return;
-
-    const sr = full.sampleRate;
-    const frameSize = 2048;
-    const hopSize = Math.max(512, Math.floor(sr / 20));
-    Meyda.sampleRate = sr; Meyda.bufferSize = frameSize;
-    const det = PitchDetector.forFloat32Array(frameSize);
-    const ch = full.getChannelData(0);
-
-    const rawRms: number[] = [], rawC: number[] = [],
-          rawP: number[] = [], confs: number[] = [], times: number[] = [];
-
-    for (let i = 0; i < ch.length - frameSize; i += hopSize) {
-      const frame = ch.slice(i, i + frameSize);
-      const f = Meyda.extract(['spectralCentroid', 'rms'], frame);
-      if (!f) continue;
-      times.push(i / sr); rawRms.push(f.rms || 0); rawC.push(f.spectralCentroid || 0);
-      const [freq, cl] = det.findPitch(frame, sr);
-      rawP.push(freq && cl > 0 ? 69 + 12 * Math.log2(freq / 440) : 0); confs.push(cl);
-      if (rawRms.length % 50 === 0) await new Promise(r => setTimeout(r, 0));
-      if (isCancelled()) return;
-    }
-
-    const nRms = normalizeFeatureArr(rawRms), nC = normalizeFeatureArr(rawC);
-    const feats: FrameFeatures[] = [];
-    let si = -1;
-    for (let i = 1; i < rawP.length; i++) {
-      const p = rawP[i];
-      if (p > 0 && si === -1) si = i;
-      const end = si !== -1 && (p === 0 || Math.abs(p - rawP[si]) > 0.8 || i === rawP.length - 1);
-      if (end) {
-        feats.push({
-          time: times[si], duration: times[i] - times[si],
-          pitch: medianPitch(rawP.slice(si, i + 1)), pitchConf: confs[si],
-          rms: avgOf(nRms.slice(si, i + 1)), centroid: avgOf(nC.slice(si, i + 1)),
-        });
-        si = p > 0 ? i : -1;
-      }
-    }
-    // Energy fallback for polyphonic content
-    if (!feats.length && times.length) {
-      const fd = hopSize / sr;
-      for (let i = 0; i < times.length; i += 8) {
-        const r = nRms[i] ?? 0, c = nC[i] ?? 0, p = rawP[i] ?? 0;
-        feats.push({
-          time: times[i], duration: Math.max(fd * 8, 0.06),
-          pitch: p > 0 ? p : 48 + c * 24, pitchConf: confs[i] ?? 0, rms: r, centroid: c,
-        });
-      }
-    }
-    if (!isCancelled()) onDone(feats, full.duration);
-  } catch (e) { console.error('[ComparisonPage] analysis:', e); }
-}
+// (analyzeAudioUrl is imported from visDrawHelpers — shared with StemVisualizationView)
 
 // ─── Drawing helpers ──────────────────────────────────────────────────────────
 
@@ -241,11 +170,9 @@ export default function ComparisonPage() {
     setInputUrl(prev => { if (prev) URL.revokeObjectURL(prev); return url; });
     inputFeaturesRef.current = []; inputDurRef.current = 0;
     let cancelled = false;
-    new Audio(url).addEventListener('loadedmetadata', function() {
-      analyzeFile(url, (feats, dur) => {
-        inputFeaturesRef.current = feats; inputDurRef.current = dur;
-      }, () => cancelled);
-    }, { once: true });
+    void analyzeAudioUrl(url, (feats: FrameFeatures[], dur: number) => {
+      inputFeaturesRef.current = feats; inputDurRef.current = dur;
+    }, () => cancelled);
     return () => { cancelled = true; };
   }, []);
 
@@ -255,11 +182,9 @@ export default function ComparisonPage() {
     setOutputUrl(prev => { if (prev) URL.revokeObjectURL(prev); return url; });
     outputFeaturesRef.current = []; outputDurRef.current = 0;
     let cancelled = false;
-    new Audio(url).addEventListener('loadedmetadata', function() {
-      analyzeFile(url, (feats, dur) => {
-        outputFeaturesRef.current = feats; outputDurRef.current = dur;
-      }, () => cancelled);
-    }, { once: true });
+    void analyzeAudioUrl(url, (feats: FrameFeatures[], dur: number) => {
+      outputFeaturesRef.current = feats; outputDurRef.current = dur;
+    }, () => cancelled);
     return () => { cancelled = true; };
   }, []);
 

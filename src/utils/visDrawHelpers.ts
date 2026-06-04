@@ -2,6 +2,9 @@
 // Shared drawing + audio-analysis helpers for the spiral galaxy visualizer.
 // ============================================================
 
+import Meyda from 'meyda';
+import { PitchDetector } from 'pitchy';
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface FrameFeatures {
@@ -201,7 +204,8 @@ export function visualizeNote(
   color: string, size: number, glowSize: number,
   orbitDuration: number,
   isMidi = false,
-  alphaScale = 1
+  alphaScale = 1,
+  overrideR?: number
 ) {
   const minAlpha = 0.015;
   const fadeTime = 0.7;
@@ -220,7 +224,9 @@ export function visualizeNote(
 
   const pitchNorm = mapPitch(pitch);
   const pitchSpread = 2.5;
-  const rBase = baseRadius + (pitchNorm - 0.5) * baseRadius * pitchSpread;
+  const rBase = overrideR !== undefined
+    ? overrideR
+    : baseRadius + (pitchNorm - 0.5) * baseRadius * pitchSpread;
 
   const orbitIndex = Math.floor(startTime / orbitDuration);
   const orbitStart = orbitIndex * orbitDuration;
@@ -267,9 +273,11 @@ export function drawFeatureNote(
   audioT: number,
   cx: number, cy: number,
   baseR: number, orbitDur: number,
-  alphaScale = 1
+  alphaScale = 1,
+  overrideR?: number,
+  colorOverride?: string
 ) {
-  const color = getGalaxyColor(evt.rms, evt.centroid);
+  const color = colorOverride ?? getGalaxyColor(evt.rms, evt.centroid);
   const size = 10 + evt.rms * 10;
   const glowSize = size * 2 + evt.rms * 10;
   const dt = audioT - evt.time;
@@ -277,6 +285,111 @@ export function drawFeatureNote(
     ctx, dt, audioT,
     evt.time, evt.duration, evt.pitch, evt.rms,
     cx, cy, baseR, color, size, glowSize,
-    orbitDur, false, alphaScale
+    orbitDur, false, alphaScale, overrideR
   );
+}
+
+// ── Audio analysis ────────────────────────────────────────────────────────────
+
+/**
+ * Fetches an audio URL, runs Meyda + pitchy frame analysis, and returns
+ * FrameFeatures[] via callback. Shared between ComparisonPage and StemVisualizationView.
+ *
+ * @param url         - Audio URL or base64 data URI to analyze
+ * @param onDone      - Called with (features, duration) on completion
+ * @param isCancelled - Polled periodically; analysis stops if it returns true
+ */
+export async function analyzeAudioUrl(
+  url: string,
+  onDone: (features: FrameFeatures[], duration: number) => void,
+  isCancelled: () => boolean
+): Promise<void> {
+  try {
+    const buf = await (await fetch(url)).arrayBuffer();
+    if (isCancelled()) return;
+    const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)();
+    const full = await audioCtx.decodeAudioData(buf);
+    void audioCtx.close();
+    if (isCancelled()) return;
+
+    const sr = full.sampleRate;
+    const frameSize = 2048;
+    const hopSize = Math.max(512, Math.floor(sr / 20));
+
+    Meyda.sampleRate = sr;
+    Meyda.bufferSize = frameSize;
+    const det = PitchDetector.forFloat32Array(frameSize);
+    const ch = full.getChannelData(0);
+
+    const rawRms: number[] = [];
+    const rawC: number[] = [];
+    const rawP: number[] = [];
+    const confs: number[] = [];
+    const times: number[] = [];
+
+    for (let i = 0; i < ch.length - frameSize; i += hopSize) {
+      const frame = ch.slice(i, i + frameSize);
+      const f = Meyda.extract(['spectralCentroid', 'rms'], frame);
+      if (!f) continue;
+      times.push(i / sr);
+      rawRms.push(f.rms || 0);
+      rawC.push(f.spectralCentroid || 0);
+      const [freq, cl] = det.findPitch(frame, sr);
+      rawP.push(freq && cl > 0 ? 69 + 12 * Math.log2(freq / 440) : 0);
+      confs.push(cl);
+      if (rawRms.length % 50 === 0) await new Promise(r => setTimeout(r, 0));
+      if (isCancelled()) return;
+    }
+
+    const nRms = normalizeFeatureArr(rawRms);
+    const nC   = normalizeFeatureArr(rawC);
+
+    const avgOf = (arr: number[]) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
+
+    // Drop events whose average raw RMS is below this level — they're inaudible noise
+    // that shows up as spurious stars in the visualization (especially in near-silent stems).
+    const MIN_EVENT_RMS = 0.01;
+
+    const feats: FrameFeatures[] = [];
+    let si = -1;
+    for (let i = 1; i < rawP.length; i++) {
+      const p = rawP[i];
+      if (p > 0 && si === -1) si = i;
+      const end = si !== -1 && (p === 0 || Math.abs(p - rawP[si]) > 0.8 || i === rawP.length - 1);
+      if (end) {
+        if (avgOf(rawRms.slice(si, i + 1)) >= MIN_EVENT_RMS) {
+          feats.push({
+            time:     times[si],
+            duration: times[i] - times[si],
+            pitch:    medianPitch(rawP.slice(si, i + 1)),
+            pitchConf: confs[si],
+            rms:      avgOf(nRms.slice(si, i + 1)),
+            centroid: avgOf(nC.slice(si, i + 1)),
+          });
+        }
+        si = p > 0 ? i : -1;
+      }
+    }
+
+    // Energy fallback for polyphonic / percussive content
+    if (!feats.length && times.length) {
+      const fd = hopSize / sr;
+      for (let i = 0; i < times.length; i += 8) {
+        if ((rawRms[i] ?? 0) < MIN_EVENT_RMS) continue;
+        const r = nRms[i] ?? 0, c = nC[i] ?? 0, p = rawP[i] ?? 0;
+        feats.push({
+          time:     times[i],
+          duration: Math.max(fd * 8, 0.06),
+          pitch:    p > 0 ? p : 48 + c * 24,
+          pitchConf: confs[i] ?? 0,
+          rms:      r,
+          centroid: c,
+        });
+      }
+    }
+
+    if (!isCancelled()) onDone(feats, full.duration);
+  } catch (e) {
+    console.error('[analyzeAudioUrl]', e);
+  }
 }
