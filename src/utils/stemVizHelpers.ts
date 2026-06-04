@@ -14,7 +14,7 @@ export const STEM_HEX: Record<string, string> = {
  * Default stem order, inner ring (index 0) to outer ring (index 3).
  * Matches the user preference: other → bass → drums → vocals (outermost).
  */
-export const DEFAULT_STEM_ORDER: string[] = ['bass', 'drums', 'other', 'vocals'];
+export const DEFAULT_STEM_ORDER: string[] = ['drums', 'bass', 'other', 'vocals'];
 
 // Radial extents for the ring layout, relative to baseRadius.
 // Chosen so the inner ring is clearly visible and the outer ring has room for labels.
@@ -40,7 +40,7 @@ export function ringCenterRadius(ringIdx: number, numRings: number, baseR: numbe
 export function ringBandHalf(numRings: number, baseR: number): number {
   if (numRings <= 1) return baseR * 0.4;
   const spacing = baseR * (OUTER_FACTOR - INNER_FACTOR) / (numRings - 1);
-  return spacing * 0.3;
+  return spacing * 0.5;
 }
 
 /**
@@ -75,9 +75,9 @@ export function drawStemLabel(
   isSelected: boolean, isDimmed: boolean
 ): void {
   ctx.save();
-  ctx.globalAlpha = isDimmed ? 0.18 : isSelected ? 0.95 : 0.55;
+  ctx.globalAlpha = isDimmed ? 0.18 : isSelected ? 0.95 : 0.65;
   ctx.fillStyle = hexColor;
-  ctx.font = `${isSelected ? 'bold ' : ''}11px Inter, sans-serif`;
+  ctx.font = `bold ${isSelected ? '13px' : '12px'} Inter, sans-serif`;
   ctx.textAlign = 'left';
   ctx.textBaseline = 'middle';
   ctx.fillText(stem.toUpperCase(), cx + r + 10, cy);

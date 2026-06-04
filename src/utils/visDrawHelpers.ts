@@ -302,7 +302,8 @@ export function drawFeatureNote(
 export async function analyzeAudioUrl(
   url: string,
   onDone: (features: FrameFeatures[], duration: number) => void,
-  isCancelled: () => boolean
+  isCancelled: () => boolean,
+  minRms = 0.01  // per-stem loudness floor; caller can override per stem
 ): Promise<void> {
   try {
     const buf = await (await fetch(url)).arrayBuffer();
@@ -346,10 +347,6 @@ export async function analyzeAudioUrl(
 
     const avgOf = (arr: number[]) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
 
-    // Drop events whose average raw RMS is below this level — they're inaudible noise
-    // that shows up as spurious stars in the visualization (especially in near-silent stems).
-    const MIN_EVENT_RMS = 0.01;
-
     const feats: FrameFeatures[] = [];
     let si = -1;
     for (let i = 1; i < rawP.length; i++) {
@@ -357,7 +354,7 @@ export async function analyzeAudioUrl(
       if (p > 0 && si === -1) si = i;
       const end = si !== -1 && (p === 0 || Math.abs(p - rawP[si]) > 0.8 || i === rawP.length - 1);
       if (end) {
-        if (avgOf(rawRms.slice(si, i + 1)) >= MIN_EVENT_RMS) {
+        if (avgOf(rawRms.slice(si, i + 1)) >= minRms) {
           feats.push({
             time:     times[si],
             duration: times[i] - times[si],
@@ -375,7 +372,7 @@ export async function analyzeAudioUrl(
     if (!feats.length && times.length) {
       const fd = hopSize / sr;
       for (let i = 0; i < times.length; i += 8) {
-        if ((rawRms[i] ?? 0) < MIN_EVENT_RMS) continue;
+        if ((rawRms[i] ?? 0) < minRms) continue;
         const r = nRms[i] ?? 0, c = nC[i] ?? 0, p = rawP[i] ?? 0;
         feats.push({
           time:     times[i],

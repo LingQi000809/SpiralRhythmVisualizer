@@ -273,13 +273,23 @@ export default function App() {
         style={{ display: showOutput ? 'block' : 'none', width: '100%', height: 36, flexShrink: 0 }}
       />
 
-      {/* Header: upload zones + action buttons */}
+      {/* Single header row: uploads + buttons + demucs status (inline to keep viz area stable) */}
       <div style={s.row}>
         <UploadZone id="in-file"  label="Input"  fileName={inputFileName}  onFile={handleInputFile} />
         <UploadZone id="out-file" label="Output" fileName={outputFileName} onFile={handleOutputFile}
           hint="Simulates model output — calls the AI model in production" />
         {inActivePhase ? (
-          <button style={{ ...s.btn, ...s.btnGhost }} onClick={handleReset}>Reset</button>
+          <>
+            <button style={{ ...s.btn, ...s.btnGhost }} onClick={handleReset}>Reset</button>
+            {showDemucsStatus && (
+              <>
+                <span style={s.demucsText}>Analyzing with Demucs…</span>
+                <button style={{ ...s.btn, ...s.btnSm }} onClick={handleToggleInputMute}>
+                  {inputMuted ? 'Unmute input' : 'Mute input'}
+                </button>
+              </>
+            )}
+          </>
         ) : (
           <>
             <button style={{ ...s.btn, opacity: inputUrl  ? 1 : 0.4 }} disabled={!inputUrl}  onClick={handlePlay}>Play</button>
@@ -288,16 +298,6 @@ export default function App() {
         )}
         {statusText && <span style={s.statusText}>{statusText}</span>}
       </div>
-
-      {/* Demucs status + mute toggle — shown below header while waiting */}
-      {showDemucsStatus && (
-        <div style={s.demucsRow}>
-          <span style={s.demucsText}>Analyzing with Demucs…</span>
-          <button style={{ ...s.btn, ...s.btnSm }} onClick={handleToggleInputMute}>
-            {inputMuted ? 'Unmute input' : 'Mute input'}
-          </button>
-        </div>
-      )}
 
       {/* Visualization area */}
       {phase === 'idle' ? (
@@ -330,6 +330,7 @@ export default function App() {
             }}>
               <StemVisualizationView
                 audioUrl={outputUrl!}
+                inputAudioUrl={inputUrl ?? undefined}
                 currentTime={0}
                 duration={0}
                 isPlaying={false}
@@ -380,12 +381,8 @@ const s: Record<string, React.CSSProperties> = {
     boxSizing: 'border-box', overflow: 'hidden',
     padding: 20, gap: 10,
   },
-  row:    { display: 'flex', gap: 10, alignItems: 'center', flexShrink: 0 },
-  demucsRow: {
-    display: 'flex', gap: 12, alignItems: 'center', flexShrink: 0,
-    padding: '6px 0',
-  },
-  demucsText: { fontSize: 13, color: 'rgba(255,255,255,0.45)' },
+  row:       { display: 'flex', gap: 10, alignItems: 'center', flexShrink: 0 },
+  demucsText: { fontSize: 13, color: 'rgba(255,255,255,0.45)', flexShrink: 0 },
   drop: {
     flex: 1, border: '1px dashed rgba(255,255,255,0.15)', borderRadius: 8,
     padding: '10px 14px', cursor: 'pointer', userSelect: 'none', minWidth: 0,
