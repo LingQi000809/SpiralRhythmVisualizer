@@ -2,6 +2,30 @@ import { useState, useRef, useEffect, useCallback } from 'react';
 import { VisualizationWaitingView } from './components/VisualizationWaitingView';
 import { StemVisualizationView } from './components/StemVisualizationView';
 import type { InputData } from './utils/visMidiHelpers';
+import ComparisonPage from './pages/ComparisonPage';
+
+type ActiveTab = 'main' | 'similarity';
+
+function TabShell() {
+  const [tab, setTab] = useState<ActiveTab>('main');
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', width: '100vw', height: '100vh', background: '#0b0e14', color: '#fff', fontFamily: 'Inter, sans-serif', boxSizing: 'border-box', overflow: 'hidden' }}>
+      <div style={{ display: 'flex', gap: 2, padding: '8px 16px 0', flexShrink: 0, borderBottom: '1px solid rgba(255,255,255,0.07)' }}>
+        {(['main', 'similarity'] as ActiveTab[]).map(t => (
+          <button key={t} onClick={() => setTab(t)} style={{ background: 'none', border: 'none', borderBottom: tab === t ? '2px solid #7B8FFF' : '2px solid transparent', color: tab === t ? '#fff' : 'rgba(255,255,255,0.35)', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13, padding: '6px 14px 8px', marginBottom: -1, transition: 'color 0.15s' }}>
+            {t === 'main' ? 'Main' : 'Similarity Lab'}
+          </button>
+        ))}
+      </div>
+      <div style={{ flex: 1, minHeight: 0, padding: 20, display: 'flex', flexDirection: 'column' }}>
+        {tab === 'main'        ? <App />            : null}
+        {tab === 'similarity'  ? <ComparisonPage /> : null}
+      </div>
+    </div>
+  );
+}
+
+export { TabShell };
 
 // ── Phase model ───────────────────────────────────────────────────────────────
 // idle       → nothing active

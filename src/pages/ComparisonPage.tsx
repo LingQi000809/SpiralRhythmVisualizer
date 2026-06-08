@@ -1,13 +1,21 @@
-// LOCAL DEV SCAFFOLDING — POC for input-output visualization comparison.
+// LOCAL DEV SCAFFOLDING — POC for audio music similarity detection.
+// Accepts an input audio and a separated output stem, renders one orbital ring
+// (output visualization style) and marks similar segments as motif puffs.
+// Similarity algorithm TBA — currently uses hardcoded SIMILARITY_MATCHES.
 
 import { useRef, useState, useCallback, useEffect } from 'react';
 import {
   type FrameFeatures,
   mapPitch,
-  getGalaxyColor,
   drawFeatureNote,
   analyzeAudioUrl,
 } from '../utils/visDrawHelpers';
+import {
+  ringCenterRadius,
+  ringBandHalf,
+  drawOrbitRing,
+  stemGalaxyColor,
+} from '../utils/stemVizHelpers';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -17,58 +25,40 @@ interface SimilarityMatch {
   label: string; rgb: [number, number, number];
 }
 
-type Phase = 'idle' | 'input' | 'transitioning' | 'output';
+type Phase = 'idle' | 'ready';
 
-// ─── [POC] Hard-coded similarity — replace with backend analysis in production ──
+// ─── [Scaffold] Hard-coded similarity — replace with backend analysis ─────────
 const SIMILARITY_MATCHES: SimilarityMatch[] = [
-  { inputStart: 2.0,  inputEnd: 4.0,  outputStart: 0.0,  outputEnd: 1.0,  label: 'Motif A', rgb: [255, 140, 80] },
-  { inputStart: 2.0,  inputEnd: 4.0,  outputStart: 4.0,  outputEnd: 5.0,  label: 'Motif A', rgb: [255, 140, 80] },
-  { inputStart: 7.0,  inputEnd: 9.0,  outputStart: 12.0, outputEnd: 16.0, label: 'Motif B', rgb: [80, 220, 170] },
+  { inputStart: 2.0,  inputEnd: 4.0,  outputStart: 0.0,  outputEnd: 1.0,  label: 'Motif A', rgb: [255, 140, 80]  },
+  { inputStart: 2.0,  inputEnd: 4.0,  outputStart: 4.0,  outputEnd: 5.0,  label: 'Motif A', rgb: [255, 140, 80]  },
+  { inputStart: 7.0,  inputEnd: 9.0,  outputStart: 12.0, outputEnd: 16.0, label: 'Motif B', rgb: [80,  220, 170] },
 ];
 
-const TRANSITION_MS      = 2800;
-const OUTPUT_READY_DELAY = 10;
+const DEFAULT_INPUT_URL  = '/data/compare1_hp.wav';
+const DEFAULT_OUTPUT_URL = '/data/compare2_hp.wav';
 
-// ─── Audio analysis ───────────────────────────────────────────────────────────
-// (analyzeAudioUrl is imported from visDrawHelpers — shared with StemVisualizationView)
+const RING_COLOR   = '#7B8FFF';
+const RING_LABEL   = 'output stem';
+const PUFF_SPAWN_MS = 1300;
+const PUFF_HIT_PX   = 60;
 
 // ─── Drawing helpers ──────────────────────────────────────────────────────────
 
-function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
-function easeIn3(t: number) { return t * t * t; }
 function easeOut3(t: number) { return 1 - Math.pow(1 - t, 3); }
+function lerp(a: number, b: number, t: number) { return a + (b - a) * t; }
 
-// Compute the live orbital position of a feature event — used for puff anchoring.
-// Uses the same radius formula as visualizeNote so puff positions track the spiral correctly.
-function orbitalPos(
-  startTime: number, audioTime: number, pitch: number,
-  orbitDur: number, baseR: number, cx: number, cy: number
-) {
-  const pn = mapPitch(pitch);
-  const r = baseR + (pn - 0.5) * baseR * 2.5; // same as production visualizeNote
-  const oi = Math.floor(startTime / orbitDur);
-  const op = (startTime - oi * orbitDur) / orbitDur;
-  const angle = op * Math.PI * 2 + oi * 0.3 + audioTime * 0.1;
-  return { x: cx + Math.cos(angle) * r, y: cy + Math.sin(angle) * r, angle, r };
-}
-
-// Spanning glow — one soft blob per output onset in the match window.
-// Blobs overlap via 'screen' blend, creating a luminous smear across the snippet.
-// Opacity per blob scales by 1/√n so the cloud stays readable regardless of density.
 function drawSpanningPuff(
   ctx: CanvasRenderingContext2D,
   positions: { x: number; y: number }[],
-  anchor: { x: number; y: number },
+  anchor:    { x: number; y: number },
   match: SimilarityMatch,
   now: number,
-  selected: boolean
 ) {
   const [r, g, b] = match.rgb;
-  const pulse = 1 + Math.sin(now * 0.002) * 0.12;
-  const n = Math.max(1, positions.length);
-  const baseStrength = selected ? 0.45 : 0.28;
-  const strength = baseStrength / Math.sqrt(n);
-  const radius = (selected ? 30 : 22) * pulse;
+  const pulse    = 1 + Math.sin(now * 0.002) * 0.12;
+  const n        = Math.max(1, positions.length);
+  const strength = 0.28 / Math.sqrt(n);
+  const radius   = 22 * pulse;
 
   ctx.globalCompositeOperation = 'screen';
   for (const pos of positions) {
@@ -82,15 +72,31 @@ function drawSpanningPuff(
   }
   ctx.globalCompositeOperation = 'source-over';
 
-  ctx.globalAlpha = selected ? 0.95 : 0.65;
-  ctx.fillStyle = `rgb(${r},${g},${b})`;
-  ctx.font = `${selected ? 12 : 11}px Inter,sans-serif`;
-  ctx.textAlign = 'center'; ctx.textBaseline = 'top';
+  ctx.globalAlpha = 0.65;
+  ctx.fillStyle   = `rgb(${r},${g},${b})`;
+  ctx.font        = '11px Inter, sans-serif';
+  ctx.textAlign   = 'center'; ctx.textBaseline = 'top';
   ctx.fillText(match.label, anchor.x, anchor.y + radius + 4);
   ctx.globalAlpha = 1; ctx.textBaseline = 'alphabetic';
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// Orbital XY for a feature event on the single ring — mirrors StemVisualizationView.featOrbitalPos
+function featOrbitalPos(
+  feat: FrameFeatures,
+  audioTime: number,
+  pitchMedian: number,
+  ringR: number, bandHalf: number,
+  cx: number, cy: number,
+  orbitDur: number,
+) {
+  const pn   = mapPitch(feat.pitch);
+  const dev  = (pn - pitchMedian) * bandHalf * 2;
+  const oi   = Math.floor(feat.time / orbitDur);
+  const op   = (feat.time - oi * orbitDur) / orbitDur;
+  const ang  = op * Math.PI * 2 + oi * 0.3 + audioTime * 0.1;
+  const orbR = ringR + dev;
+  return { x: cx + Math.cos(ang) * orbR, y: cy + Math.sin(ang) * orbR };
+}
 
 function fmt(s: number): string {
   const m = Math.floor(s / 60);
@@ -99,46 +105,40 @@ function fmt(s: number): string {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
+type MatchState = { anchorIdx: number; windowIndices: number[]; spawnTime: number } | null;
+
 export default function ComparisonPage() {
   const inputAudioRef  = useRef<HTMLAudioElement | null>(null);
   const outputAudioRef = useRef<HTMLAudioElement | null>(null);
   const canvasRef      = useRef<HTMLCanvasElement | null>(null);
 
-  const [inputUrl,       setInputUrl]       = useState<string | null>(null);
-  const [outputUrl,      setOutputUrl]      = useState<string | null>(null);
-  const [inputFileName,  setInputFileName]  = useState('');
-  const [outputFileName, setOutputFileName] = useState('');
-
+  const [inputUrl,       setInputUrl]       = useState<string | null>(DEFAULT_INPUT_URL);
+  const [outputUrl,      setOutputUrl]      = useState<string | null>(DEFAULT_OUTPUT_URL);
+  const [inputFileName,  setInputFileName]  = useState('input.wav');
+  const [outputFileName, setOutputFileName] = useState('output.wav');
   const [phase,          setPhase]          = useState<Phase>('idle');
-  const [countdown,      setCountdown]      = useState(OUTPUT_READY_DELAY);
   const [selectedMatch,  setSelectedMatch]  = useState<SimilarityMatch | null>(null);
   const [playingSnippet, setPlayingSnippet] = useState<'input' | 'output' | null>(null);
 
-  // Output audio player state
+  // Output player state
   const [outTime,    setOutTime]    = useState(0);
   const [outDur,     setOutDur]     = useState(0);
   const [outPlaying, setOutPlaying] = useState(false);
 
   // RAF-accessible refs
-  const phaseRef           = useRef<Phase>('idle');
-  const transitionStartRef = useRef(0);
-  const inputFeaturesRef   = useRef<FrameFeatures[]>([]);
-  const outputFeaturesRef  = useRef<FrameFeatures[]>([]);
-  const inputDurRef        = useRef(0);
-  const outputDurRef       = useRef(0);
-  const puffPositionsRef   = useRef<Array<{ x: number; y: number; match: SimilarityMatch }>>([]);
-  const selectedMatchRef   = useRef<SimilarityMatch | null>(null);
-  const playingSnippetRef  = useRef<'input' | 'output' | null>(null);
-  const snippetTimerRef    = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const outputFeaturesRef = useRef<FrameFeatures[]>([]);
+  const outputDurRef      = useRef(0);
+  const pitchMedianRef    = useRef(0.5);
+  const matchStatesRef    = useRef<MatchState[]>(SIMILARITY_MATCHES.map(() => null));
+  const puffHitRef        = useRef<Array<{ anchor: {x:number;y:number}; windowPos: {x:number;y:number}[]; match: SimilarityMatch }>>([]);
+  const selectedMatchRef  = useRef<SimilarityMatch | null>(null);
+  const playingSnippetRef = useRef<'input' | 'output' | null>(null);
+  const snippetTimerRef   = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const snapshotTakenRef = useRef(false);
-  const lastPhaseRef     = useRef<Phase>('idle');
-
-  useEffect(() => { phaseRef.current = phase; }, [phase]);
-  useEffect(() => { selectedMatchRef.current = selectedMatch; }, [selectedMatch]);
+  useEffect(() => { selectedMatchRef.current  = selectedMatch;  }, [selectedMatch]);
   useEffect(() => { playingSnippetRef.current = playingSnippet; }, [playingSnippet]);
 
-  // ── Output audio player listeners ──────────────────────────────────────────
+  // ── Output player listeners ───────────────────────────────────────────────
   useEffect(() => {
     const el = outputAudioRef.current;
     if (!el) return;
@@ -150,85 +150,80 @@ export default function ComparisonPage() {
     el.addEventListener('timeupdate',     onTime);
     el.addEventListener('durationchange', onDur);
     el.addEventListener('loadedmetadata', onDur);
-    el.addEventListener('play',  onPlay);
-    el.addEventListener('pause', onPause);
-    el.addEventListener('ended', onEnded);
+    el.addEventListener('play',           onPlay);
+    el.addEventListener('pause',          onPause);
+    el.addEventListener('ended',          onEnded);
     return () => {
       el.removeEventListener('timeupdate',     onTime);
       el.removeEventListener('durationchange', onDur);
       el.removeEventListener('loadedmetadata', onDur);
-      el.removeEventListener('play',  onPlay);
-      el.removeEventListener('pause', onPause);
-      el.removeEventListener('ended', onEnded);
+      el.removeEventListener('play',           onPlay);
+      el.removeEventListener('pause',          onPause);
+      el.removeEventListener('ended',          onEnded);
     };
+  }, []);
+
+  // ── Output analysis (shared by file drop and default URL) ────────────────
+  const loadOutputUrl = useCallback((url: string, name: string) => {
+    setOutputFileName(name);
+    setOutputUrl(prev => { if (prev?.startsWith('blob:')) URL.revokeObjectURL(prev); return url; });
+    outputFeaturesRef.current = [];
+    outputDurRef.current      = 0;
+    pitchMedianRef.current    = 0.5;
+    matchStatesRef.current    = SIMILARITY_MATCHES.map(() => null);
+    puffHitRef.current        = [];
+    let cancelled = false;
+    void analyzeAudioUrl(
+      url,
+      (feats: FrameFeatures[], dur: number) => {
+        if (cancelled) return;
+        outputFeaturesRef.current = feats;
+        outputDurRef.current      = dur;
+        const pitches = feats.map(f => mapPitch(f.pitch)).filter(p => p > 0).sort((a, b) => a - b);
+        pitchMedianRef.current = pitches.length ? pitches[Math.floor(pitches.length / 2)] : 0.5;
+      },
+      () => cancelled,
+    );
+    return () => { cancelled = true; };
+  }, []);
+
+  // ── Load defaults on mount ────────────────────────────────────────────────
+  useEffect(() => {
+    loadOutputUrl(DEFAULT_OUTPUT_URL, 'compare2.wav');
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // ── File handlers ──────────────────────────────────────────────────────────
   const handleInputFile = useCallback((file: File) => {
     const url = URL.createObjectURL(file);
     setInputFileName(file.name);
-    setInputUrl(prev => { if (prev) URL.revokeObjectURL(prev); return url; });
-    inputFeaturesRef.current = []; inputDurRef.current = 0;
-    let cancelled = false;
-    void analyzeAudioUrl(url, (feats: FrameFeatures[], dur: number) => {
-      inputFeaturesRef.current = feats; inputDurRef.current = dur;
-    }, () => cancelled);
-    return () => { cancelled = true; };
+    setInputUrl(prev => { if (prev?.startsWith('blob:')) URL.revokeObjectURL(prev); return url; });
   }, []);
 
   const handleOutputFile = useCallback((file: File) => {
     const url = URL.createObjectURL(file);
-    setOutputFileName(file.name);
-    setOutputUrl(prev => { if (prev) URL.revokeObjectURL(prev); return url; });
-    outputFeaturesRef.current = []; outputDurRef.current = 0;
-    let cancelled = false;
-    void analyzeAudioUrl(url, (feats: FrameFeatures[], dur: number) => {
-      outputFeaturesRef.current = feats; outputDurRef.current = dur;
-    }, () => cancelled);
-    return () => { cancelled = true; };
-  }, []);
+    loadOutputUrl(url, file.name);
+  }, [loadOutputUrl]);
 
   // ── Phase control ──────────────────────────────────────────────────────────
   const handleStart = useCallback(() => {
-    if (!inputUrl) return;
-    snapshotTakenRef.current = false;
-    setPhase('input');
-    setCountdown(OUTPUT_READY_DELAY);
+    if (!outputUrl) return;
+    matchStatesRef.current = SIMILARITY_MATCHES.map(() => null);
+    puffHitRef.current     = [];
     setSelectedMatch(null); setPlayingSnippet(null);
-    const a = inputAudioRef.current;
-    if (a) { a.currentTime = 0; void a.play(); }
-  }, [inputUrl]);
+    setPhase('ready');
+    const el = outputAudioRef.current;
+    if (el) { el.currentTime = 0; void el.play(); }
+  }, [outputUrl]);
 
   const handleReset = useCallback(() => {
-    snapshotTakenRef.current = false;
-    setPhase('idle'); setSelectedMatch(null); setPlayingSnippet(null);
-    setCountdown(OUTPUT_READY_DELAY);
-    inputAudioRef.current?.pause();
     outputAudioRef.current?.pause();
+    inputAudioRef.current?.pause();
+    matchStatesRef.current = SIMILARITY_MATCHES.map(() => null);
+    puffHitRef.current     = [];
+    setPhase('idle');
+    setSelectedMatch(null); setPlayingSnippet(null);
   }, []);
-
-  // Countdown → transitioning → output
-  useEffect(() => {
-    if (phase !== 'input') return;
-    const iv = setInterval(() => {
-      setCountdown(prev => {
-        if (prev <= 1) {
-          clearInterval(iv);
-          setPhase('transitioning');
-          transitionStartRef.current = performance.now();
-          setTimeout(() => {
-            inputAudioRef.current?.pause();
-            setPhase('output');
-            const out = outputAudioRef.current;
-            if (out) { out.currentTime = 0; void out.play(); }
-          }, TRANSITION_MS);
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-    return () => clearInterval(iv);
-  }, [phase]);
 
   // ── Canvas draw loop ───────────────────────────────────────────────────────
   useEffect(() => {
@@ -238,7 +233,7 @@ export default function ComparisonPage() {
     if (!ctx) return;
 
     const resize = () => {
-      const dpr = window.devicePixelRatio || 1;
+      const dpr  = window.devicePixelRatio || 1;
       const rect = canvas.getBoundingClientRect();
       canvas.width  = Math.round(rect.width  * dpr);
       canvas.height = Math.round(rect.height * dpr);
@@ -248,128 +243,93 @@ export default function ComparisonPage() {
     const ro = new ResizeObserver(resize);
     ro.observe(canvas);
 
-    type MatchState = { anchorIdx: number; windowIndices: number[]; spawnTime: number };
-    const matchStates: (MatchState | null)[] = SIMILARITY_MATCHES.map(() => null);
-
     let rafId: number;
 
     const draw = () => {
-      const p = phaseRef.current;
-      const rect = canvas.getBoundingClientRect();
+      const rect  = canvas.getBoundingClientRect();
       const w = rect.width, h = rect.height, cx = w / 2, cy = h / 2;
-      const baseR = Math.min(w, h) * 0.2;
-      const now = performance.now();
+      const baseR    = Math.min(w, h) * 0.25;
+      const ringR    = ringCenterRadius(0, 1, baseR);
+      const bandH    = ringBandHalf(1, baseR);
+      const now      = performance.now();
+      const outT     = outputAudioRef.current?.currentTime ?? 0;
+      const dur      = outputDurRef.current || 30;
+      const orbitDur = Math.min(dur, 10);
+      const feats    = outputFeaturesRef.current;
+      const median   = pitchMedianRef.current;
 
-      if (p !== lastPhaseRef.current) {
-        if (p !== 'transitioning') {
-          snapshotTakenRef.current = false;
+      ctx.clearRect(0, 0, w, h);
+      ctx.globalAlpha = 1;
+
+      // ── Orbit ring ──────────────────────────────────────────────────────────
+      drawOrbitRing(ctx, cx, cy, ringR, RING_COLOR, false, false);
+
+      ctx.save();
+      ctx.globalAlpha  = 0.4;
+      ctx.fillStyle    = RING_COLOR;
+      ctx.font         = 'bold 12px Inter, sans-serif';
+      ctx.textAlign    = 'left';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(RING_LABEL.toUpperCase(), cx + ringR + 12, cy);
+      ctx.restore();
+
+      // ── Similarity puffs — drawn behind stars ───────────────────────────────
+      const newHits: typeof puffHitRef.current = [];
+
+      SIMILARITY_MATCHES.forEach((match, idx) => {
+        if (outT < match.outputStart) { matchStatesRef.current[idx] = null; return; }
+
+        if (!matchStatesRef.current[idx]) {
+          const windowIndices: number[] = [];
+          feats.forEach((f, fi) => {
+            if (f.time >= match.outputStart && f.time <= match.outputEnd) windowIndices.push(fi);
+          });
+          let anchorIdx = 0, bestD = Infinity;
+          feats.forEach((f, fi) => {
+            const d = Math.abs(f.time - match.outputStart);
+            if (d < bestD) { bestD = d; anchorIdx = fi; }
+          });
+          if (!windowIndices.length) windowIndices.push(anchorIdx);
+          matchStatesRef.current[idx] = { anchorIdx, windowIndices, spawnTime: now };
         }
-        if (p !== 'output') {
-          matchStates.fill(null);
-          puffPositionsRef.current = [];
+
+        const state    = matchStatesRef.current[idx]!;
+        const progress = Math.min((now - state.spawnTime) / PUFF_SPAWN_MS, 1);
+        const aFeat    = feats[state.anchorIdx];
+        const anchor   = aFeat
+          ? featOrbitalPos(aFeat, outT, median, ringR, bandH, cx, cy, orbitDur)
+          : { x: cx + ringR, y: cy };
+
+        if (progress < 1) {
+          // Fly-in comet from canvas center
+          const [r, g, b] = match.rgb;
+          for (let trail = 0; trail < 10; trail++) {
+            const tp = Math.max(0, progress - trail * 0.018);
+            const te = easeOut3(tp);
+            ctx.globalAlpha = (0.85 - trail * 0.08) * (1 - progress * 0.15);
+            ctx.fillStyle   = `rgba(${r},${g},${b},1)`;
+            ctx.beginPath();
+            ctx.arc(lerp(cx, anchor.x, te), lerp(cy, anchor.y, te),
+              Math.max(10 - trail, 1) * 0.8, 0, Math.PI * 2);
+            ctx.fill();
+          }
+          ctx.globalAlpha = 1;
+        } else {
+          const windowPositions = state.windowIndices.map(fi => {
+            const f = feats[fi];
+            return f ? featOrbitalPos(f, outT, median, ringR, bandH, cx, cy, orbitDur) : anchor;
+          });
+          drawSpanningPuff(ctx, windowPositions, anchor, match, now);
+          newHits.push({ anchor, windowPos: windowPositions, match });
         }
-        lastPhaseRef.current = p;
-      }
+      });
+      puffHitRef.current = newHits;
 
-      ctx.clearRect(0, 0, w, h); ctx.globalAlpha = 1;
-
-      const inF  = inputFeaturesRef.current;
-      const outF = outputFeaturesRef.current.length > 0 ? outputFeaturesRef.current : inF;
-      const inDur  = inputDurRef.current  || 30;
-      const outDur = outputDurRef.current || inDur;
-      const inOrb  = Math.min(inDur,  10);
-      const outOrb = Math.min(outDur, 10);
-      const inT  = inputAudioRef.current?.currentTime  ?? 0;
-      const outT = outputAudioRef.current?.currentTime ?? 0;
-      const sel  = selectedMatchRef.current;
-
-      // ── input: normal spiral ─────────────────────────────────────────────
-      if (p === 'input') {
-        inF.forEach(evt => drawFeatureNote(ctx, evt, inT, cx, cy, baseR, inOrb));
-      }
-
-      // ── transitioning: whole spiral scales toward center ─────────────────
-      else if (p === 'transitioning') {
-        const progress = Math.min((now - transitionStartRef.current) / TRANSITION_MS, 1);
-        const eased = easeIn3(progress);
-        const effectiveBaseR = baseR * (1 - eased);
-        inF.forEach(evt =>
-          drawFeatureNote(ctx, evt, inT, cx, cy, effectiveBaseR, inOrb, lerp(1, 0, eased))
-        );
-      }
-
-      // ── output: ghost cloud + output spiral + similarity puffs ───────────
-      else if (p === 'output') {
-        // Ghost cloud — semi-transparent input particles drifting near center
-        inF.forEach((evt, i) => {
-          const a  = (i / Math.max(inF.length, 1)) * Math.PI * 2;
-          const dr = Math.sin(now * 0.0003 + i * 0.7) * 0.35;
-          const rr = 10 + (i % 9) * 3.5 + Math.sin(now * 0.0005 + i) * 4;
-          ctx.globalAlpha = 0.04 + evt.rms * 0.07;
-          ctx.fillStyle = getGalaxyColor(evt.rms, evt.centroid);
-          ctx.beginPath(); ctx.arc(cx + Math.cos(a + dr) * rr, cy + Math.sin(a + dr) * rr,
-            2 + evt.rms * 2, 0, Math.PI * 2); ctx.fill();
-        });
-        ctx.globalAlpha = 1;
-
-        // Output spiral
-        outF.forEach(evt => drawFeatureNote(ctx, evt, outT, cx, cy, baseR, outOrb));
-
-        // Per-match: fly-in + settled puff, driven by outT so scrubbing resets them
-        const newPuffs: typeof puffPositionsRef.current = [];
-        SIMILARITY_MATCHES.forEach((match, idx) => {
-          if (outT < match.outputStart) {
-            // Scrubbed back — clear so fly-in replays next time outT crosses threshold
-            matchStates[idx] = null;
-            return;
-          }
-
-          if (matchStates[idx] === null) {
-            // First frame past trigger — compute anchor/window and record wall-clock start
-            const windowIndices: number[] = [];
-            outF.forEach((f, fi) => {
-              if (f.time >= match.outputStart && f.time <= match.outputEnd) windowIndices.push(fi);
-            });
-            let anchorIdx = -1, bestD = Infinity;
-            outF.forEach((f, fi) => {
-              const d = Math.abs(f.time - match.outputStart);
-              if (d < bestD) { bestD = d; anchorIdx = fi; }
-            });
-            if (!windowIndices.length && anchorIdx >= 0) windowIndices.push(anchorIdx);
-            matchStates[idx] = { anchorIdx, windowIndices, spawnTime: now };
-          }
-
-          const state = matchStates[idx]!;
-          const progress = Math.min((now - state.spawnTime) / 1300, 1);
-          const anchorEvt = outF[state.anchorIdx];
-          const anchorPos = anchorEvt
-            ? orbitalPos(anchorEvt.time, outT, anchorEvt.pitch, outOrb, baseR, cx, cy)
-            : { x: cx + 80, y: cy };
-
-          if (progress < 1) {
-            const [r, g, b] = match.rgb;
-            for (let t = 0; t < 10; t++) {
-              const tp = Math.max(0, progress - t * 0.018);
-              const te = easeOut3(tp);
-              ctx.globalAlpha = (0.85 - t * 0.08) * (1 - progress * 0.15);
-              ctx.fillStyle = `rgba(${r},${g},${b},1)`;
-              ctx.beginPath(); ctx.arc(
-                lerp(cx, anchorPos.x, te), lerp(cy, anchorPos.y, te),
-                Math.max(10 - t, 1) * 0.8, 0, Math.PI * 2
-              ); ctx.fill();
-            }
-            ctx.globalAlpha = 1;
-          } else {
-            const windowPositions = state.windowIndices.map((i: number) => {
-              const f = outF[i];
-              return f ? orbitalPos(f.time, outT, f.pitch, outOrb, baseR, cx, cy) : anchorPos;
-            });
-            const isSel = sel?.label === match.label;
-            drawSpanningPuff(ctx, windowPositions, anchorPos, match, now, isSel);
-            for (const pos of windowPositions) newPuffs.push({ x: pos.x, y: pos.y, match });
-          }
-        });
-        puffPositionsRef.current = newPuffs;
+      // ── Stars on ring ───────────────────────────────────────────────────────
+      for (const feat of feats) {
+        const orbR  = ringR + (mapPitch(feat.pitch) - median) * bandH * 2;
+        const color = stemGalaxyColor('other', feat.rms, feat.centroid);
+        drawFeatureNote(ctx, feat, outT, cx, cy, baseR, orbitDur, 1.0, orbR, color);
       }
 
       ctx.globalAlpha = 1;
@@ -380,32 +340,48 @@ export default function ComparisonPage() {
     return () => { cancelAnimationFrame(rafId); ro.disconnect(); };
   }, []);
 
-  // ── Canvas interaction ─────────────────────────────────────────────────────
+  // ── Canvas click / hover ───────────────────────────────────────────────────
   const handleCanvasClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (phaseRef.current !== 'output') return;
-    const rect = canvasRef.current!.getBoundingClientRect();
+    if (selectedMatchRef.current) {
+      if (snippetTimerRef.current) clearTimeout(snippetTimerRef.current);
+      inputAudioRef.current?.pause();
+      setSelectedMatch(null); setPlayingSnippet(null);
+      void outputAudioRef.current?.play();
+      return;
+    }
+    if (!canvasRef.current) return;
+    const rect = canvasRef.current.getBoundingClientRect();
     const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-    for (const puff of puffPositionsRef.current) {
-      if (Math.hypot(mx - puff.x, my - puff.y) < 42) {
-        setSelectedMatch(puff.match);
-        setPlayingSnippet(null);
+    for (const hit of puffHitRef.current) {
+      const over =
+        Math.hypot(mx - hit.anchor.x, my - hit.anchor.y) < PUFF_HIT_PX ||
+        hit.windowPos.some(p => Math.hypot(mx - p.x, my - p.y) < PUFF_HIT_PX);
+      if (over) {
         outputAudioRef.current?.pause();
         if (snippetTimerRef.current) clearTimeout(snippetTimerRef.current);
-        break;
+        setSelectedMatch(hit.match);
+        setPlayingSnippet(null);
+        return;
       }
     }
   }, []);
 
   const handleCanvasMouseMove = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (phaseRef.current !== 'output' || !canvasRef.current) return;
+    if (!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const mx = e.clientX - rect.left, my = e.clientY - rect.top;
-    const over = puffPositionsRef.current.some(p => Math.hypot(mx - p.x, my - p.y) < 42);
+    const over = puffHitRef.current.some(hit =>
+      Math.hypot(mx - hit.anchor.x, my - hit.anchor.y) < PUFF_HIT_PX ||
+      hit.windowPos.some(p => Math.hypot(mx - p.x, my - p.y) < PUFF_HIT_PX),
+    );
     canvasRef.current.style.cursor = over ? 'pointer' : 'default';
   }, []);
 
-  // ── Snippet playback — toggles pause if already playing that type ──────────
+  // ── Snippet playback ───────────────────────────────────────────────────────
   const playSnippet = useCallback((type: 'input' | 'output') => {
+    const match = selectedMatchRef.current;
+    if (!match) return;
+
     if (playingSnippetRef.current === type) {
       if (snippetTimerRef.current) clearTimeout(snippetTimerRef.current);
       (type === 'input' ? inputAudioRef : outputAudioRef).current?.pause();
@@ -413,12 +389,10 @@ export default function ComparisonPage() {
       return;
     }
 
-    if (!selectedMatchRef.current) return;
     if (snippetTimerRef.current) clearTimeout(snippetTimerRef.current);
     inputAudioRef.current?.pause();
     outputAudioRef.current?.pause();
 
-    const match = selectedMatchRef.current;
     const audio = (type === 'input' ? inputAudioRef : outputAudioRef).current;
     const start = type === 'input' ? match.inputStart  : match.outputStart;
     const end   = type === 'input' ? match.inputEnd    : match.outputEnd;
@@ -438,7 +412,7 @@ export default function ComparisonPage() {
     if (snippetTimerRef.current) clearTimeout(snippetTimerRef.current);
     inputAudioRef.current?.pause();
     setSelectedMatch(null); setPlayingSnippet(null);
-    if (phaseRef.current === 'output') void outputAudioRef.current?.play();
+    void outputAudioRef.current?.play();
   }, []);
 
   // ── Output player controls ─────────────────────────────────────────────────
@@ -451,12 +425,14 @@ export default function ComparisonPage() {
   const replayOutput = useCallback(() => {
     const el = outputAudioRef.current;
     if (!el) return;
-    el.currentTime = 0; void el.play();
+    matchStatesRef.current = SIMILARITY_MATCHES.map(() => null);
+    puffHitRef.current     = [];
     setSelectedMatch(null); setPlayingSnippet(null);
+    el.currentTime = 0; void el.play();
   }, []);
 
   const seekPointer = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    const rect = e.currentTarget.getBoundingClientRect();
+    const rect  = e.currentTarget.getBoundingClientRect();
     const ratio = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
     const el = outputAudioRef.current;
     if (el && outDur) el.currentTime = ratio * outDur;
@@ -473,35 +449,38 @@ export default function ComparisonPage() {
   }, [seekPointer]);
 
   // ── Render ─────────────────────────────────────────────────────────────────
-  const effectiveOutputSrc = outputUrl ?? inputUrl ?? undefined;
   const pct = outDur > 0 ? (outTime / outDur) * 100 : 0;
 
   return (
     <div style={s.page}>
-      {/* Hidden audio elements */}
-      <audio ref={inputAudioRef}  src={inputUrl ?? undefined}  style={{ display: 'none' }} />
-      <audio ref={outputAudioRef} src={effectiveOutputSrc}     style={{ display: 'none' }} />
+      <audio ref={inputAudioRef}  src={inputUrl  ?? undefined} style={{ display: 'none' }} />
+      <audio ref={outputAudioRef} src={outputUrl ?? undefined} style={{ display: 'none' }} />
 
       {/* Upload row */}
       <div style={s.row}>
-        <UploadZone id="cmp-in"  label="Input Audio"  fileName={inputFileName}  onFile={handleInputFile} />
-        <UploadZone id="cmp-out" label="Output Audio" fileName={outputFileName} onFile={handleOutputFile}
-          hint="Optional — uses input as demo fallback" />
+        <UploadZone id="sim-in"  label="Input Audio"  fileName={inputFileName}  onFile={handleInputFile}
+          hint="Original track (before separation)" />
+        <UploadZone id="sim-out" label="Output Stem"  fileName={outputFileName} onFile={handleOutputFile}
+          hint="Separated stem (e.g. vocals, bass)" />
       </div>
 
       {/* Controls */}
       <div style={s.row}>
         {phase === 'idle' ? (
-          <button style={{ ...s.btn, opacity: inputUrl ? 1 : 0.4 }} disabled={!inputUrl} onClick={handleStart}>
-            Start
+          <button
+            style={{ ...s.btn, opacity: outputUrl ? 1 : 0.4 }}
+            disabled={!outputUrl}
+            onClick={handleStart}
+          >
+            Analyze
           </button>
         ) : (
           <button style={{ ...s.btn, ...s.btnGhost }} onClick={handleReset}>Reset</button>
         )}
         <span style={s.statusText}>
-          {phase === 'input'         && <>Output ready in <strong style={{ color: '#fff' }}>{countdown}s</strong></>}
-          {phase === 'transitioning' && 'Processing output…'}
-          {phase === 'output'        && 'Click a glowing puff to inspect the source'}
+          {phase === 'idle' && !outputFileName && 'Upload the separated output stem to begin'}
+          {phase === 'idle' &&  outputFileName && 'Click Analyze to start'}
+          {phase === 'ready' && !selectedMatch && 'Click a glowing puff to inspect the matching segment'}
         </span>
       </div>
 
@@ -517,16 +496,17 @@ export default function ComparisonPage() {
           <SnippetPanel
             match={selectedMatch}
             playing={playingSnippet}
+            hasInput={!!inputUrl}
             onPlay={playSnippet}
             onClose={closePanel}
           />
         )}
       </div>
 
-      {/* Output audio player bar — shown in output phase when panel is closed */}
-      {phase === 'output' && !selectedMatch && (
+      {/* Output player bar */}
+      {phase === 'ready' && !selectedMatch && (
         <div style={s.playerBar}>
-          <button style={s.playerBtn} onClick={toggleOutput} title={outPlaying ? 'Pause' : 'Play'}>
+          <button style={s.playerBtn} onClick={toggleOutput}>
             {outPlaying ? '⏸' : '▶'}
           </button>
           <div
@@ -540,7 +520,7 @@ export default function ComparisonPage() {
             </div>
           </div>
           <span style={s.playerTime}>{fmt(outTime)} / {fmt(outDur)}</span>
-          <button style={s.playerBtn} onClick={replayOutput} title="Replay from start">↺</button>
+          <button style={s.playerBtn} onClick={replayOutput} title="Replay">↺</button>
         </div>
       )}
     </div>
@@ -549,9 +529,10 @@ export default function ComparisonPage() {
 
 // ─── Snippet panel ─────────────────────────────────────────────────────────────
 
-function SnippetPanel({ match, playing, onPlay, onClose }: {
+function SnippetPanel({ match, playing, hasInput, onPlay, onClose }: {
   match: SimilarityMatch;
   playing: 'input' | 'output' | null;
+  hasInput: boolean;
   onPlay: (t: 'input' | 'output') => void;
   onClose: () => void;
 }) {
@@ -564,22 +545,24 @@ function SnippetPanel({ match, playing, onPlay, onClose }: {
       <div style={s.panelHeader}>
         <span style={{ ...s.panelDot, background: accent }} />
         <span style={{ ...s.panelTitle, color: accent }}>{match.label}</span>
-        <button style={s.panelClose} onClick={onClose} title="Close">✕</button>
+        <button style={s.panelClose} onClick={onClose}>✕</button>
       </div>
       <p style={s.panelSub}>Play each snippet to hear the similarity</p>
       <div style={s.snippetRow}>
+        {hasInput && (
+          <SnippetButton
+            label="Input" start={match.inputStart} end={match.inputEnd}
+            isActive={playing === 'input'} accent={accent} accentDim={accentDim}
+            onClick={() => onPlay('input')}
+          />
+        )}
         <SnippetButton
-          label="Input" start={match.inputStart} end={match.inputEnd}
-          isActive={playing === 'input'} accent={accent} accentDim={accentDim}
-          onClick={() => onPlay('input')}
-        />
-        <SnippetButton
-          label="Output" start={match.outputStart} end={match.outputEnd}
+          label="Output stem" start={match.outputStart} end={match.outputEnd}
           isActive={playing === 'output'} accent={accent} accentDim={accentDim}
           onClick={() => onPlay('output')}
         />
       </div>
-      <button style={s.resumeBtn} onClick={onClose}>Resume output playback</button>
+      <button style={s.resumeBtn} onClick={onClose}>Resume playback</button>
     </div>
   );
 }
@@ -593,9 +576,9 @@ function SnippetButton({ label, start, end, isActive, accent, accentDim, onClick
       onClick={onClick}
       style={{
         ...s.snippetBtn,
-        background: isActive ? accentDim : 'rgba(255,255,255,0.04)',
-        border: `1px solid ${isActive ? accent : 'rgba(255,255,255,0.09)'}`,
-        color: isActive ? accent : 'rgba(255,255,255,0.72)',
+        background:  isActive ? accentDim : 'rgba(255,255,255,0.04)',
+        border:      `1px solid ${isActive ? accent : 'rgba(255,255,255,0.09)'}`,
+        color:       isActive ? accent : 'rgba(255,255,255,0.72)',
       }}
     >
       <span style={s.snippetIcon}>{isActive ? '⏸' : '▶'}</span>
@@ -613,7 +596,8 @@ function UploadZone({ id, label, fileName, onFile, hint }: {
   id: string; label: string; fileName: string; onFile: (f: File) => void; hint?: string;
 }) {
   return (
-    <div style={s.drop}
+    <div
+      style={s.drop}
       onDrop={e => { e.preventDefault(); const f = e.dataTransfer.files[0]; if (f) onFile(f); }}
       onDragOver={e => e.preventDefault()}
       onClick={() => document.getElementById(id)?.click()}
@@ -645,7 +629,7 @@ const s: Record<string, React.CSSProperties> = {
   canvasWrap:  { flex: 1, minHeight: 0, borderRadius: '10px', border: '1px solid rgba(255,255,255,0.07)', overflow: 'hidden', background: '#0d0d0d', position: 'relative' },
   canvas:      { width: '100%', height: '100%', display: 'block', transition: 'filter 0.4s ease' },
 
-  panel:       { position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', width: '300px', background: 'rgba(14,14,20,0.97)', borderRadius: '14px', border: '1px solid rgba(255,255,255,0.1)', padding: '22px 22px 18px', display: 'flex', flexDirection: 'column', gap: '14px', backdropFilter: 'blur(20px)', boxShadow: '0 28px 70px rgba(0,0,0,0.75)' },
+  panel:       { position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%,-50%)', width: '300px', background: 'rgba(14,14,20,0.97)', borderRadius: '14px', border: '1px solid rgba(255,255,255,0.1)', padding: '22px 22px 18px', display: 'flex', flexDirection: 'column', gap: '14px', backdropFilter: 'blur(20px)', boxShadow: '0 28px 70px rgba(0,0,0,0.75)', zIndex: 20 },
   panelHeader: { display: 'flex', alignItems: 'center', gap: '10px' },
   panelDot:    { width: '10px', height: '10px', borderRadius: '50%', flexShrink: 0 },
   panelTitle:  { fontWeight: 700, fontSize: '16px', flex: 1 },
