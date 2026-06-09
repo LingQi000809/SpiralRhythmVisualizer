@@ -5,6 +5,31 @@
 import Meyda from 'meyda';
 import { PitchDetector } from 'pitchy';
 
+export type PitchDetectorType = 'pitchy' | 'basic-pitch';
+
+const BASIC_PITCH_MODEL_URL = '/model/basic-pitch/model.json';
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let _basicPitchInstance: any = null;
+async function getBasicPitch() {
+  if (!_basicPitchInstance) {
+    const { BasicPitch } = await import('@spotify/basic-pitch');
+    _basicPitchInstance = new BasicPitch(BASIC_PITCH_MODEL_URL);
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return _basicPitchInstance as any;
+}
+
+async function resampleTo22050(buf: AudioBuffer): Promise<Float32Array> {
+  const TARGET_SR = 22050;
+  if (buf.sampleRate === TARGET_SR) return buf.getChannelData(0).slice();
+  const off = new OfflineAudioContext(1, Math.ceil(buf.duration * TARGET_SR), TARGET_SR);
+  const src = off.createBufferSource();
+  src.buffer = buf;
+  src.connect(off.destination);
+  src.start(0);
+  return (await off.startRendering()).getChannelData(0).slice();
+}
+
 // ── Types ─────────────────────────────────────────────────────────────────────
 
 export interface FrameFeatures {
@@ -14,6 +39,9 @@ export interface FrameFeatures {
   pitchConf: number;  // confidence about pitch
   rms: number;        // 0–1 normalized
   centroid: number;   // 0–1 normalized
+  // basic-pitch path only:
+  isMelody?: boolean;   // true = salient melody voice, false = background harmony
+  pitchLabel?: string;  // e.g. "A4" — set only for melody notes
 }
 
 // ── Audio analysis helpers ────────────────────────────────────────────────────
@@ -275,11 +303,13 @@ export function drawFeatureNote(
   baseR: number, orbitDur: number,
   alphaScale = 1,
   overrideR?: number,
-  colorOverride?: string
+  colorOverride?: string,
+  sizeScale = 1,
 ) {
-  const color = colorOverride ?? getGalaxyColor(evt.rms, evt.centroid);
-  const size = 10 + evt.rms * 10;
-  const glowSize = size * 2 + evt.rms * 10;
+  const color    = colorOverride ?? getGalaxyColor(evt.rms, evt.centroid);
+  const baseSize = 10 + evt.rms * 10;
+  const size     = baseSize * sizeScale;
+  const glowSize = (baseSize * 2 + evt.rms * 10) * sizeScale;
   const dt = audioT - evt.time;
   visualizeNote(
     ctx, dt, audioT,
@@ -303,7 +333,8 @@ export async function analyzeAudioUrl(
   url: string,
   onDone: (features: FrameFeatures[], duration: number) => void,
   isCancelled: () => boolean,
-  minRms = 0.01  // per-stem loudness floor; caller can override per stem
+  minRms = 0.01,
+  pitchDetector: PitchDetectorType = 'pitchy',
 ): Promise<void> {
   try {
     const buf = await (await fetch(url)).arrayBuffer();
@@ -313,20 +344,23 @@ export async function analyzeAudioUrl(
     void audioCtx.close();
     if (isCancelled()) return;
 
-    const sr = full.sampleRate;
+    const sr       = full.sampleRate;
     const frameSize = 2048;
-    const hopSize = Math.max(512, Math.floor(sr / 20));
+    const hopSize   = Math.max(512, Math.floor(sr / 20));
 
     Meyda.sampleRate = sr;
     Meyda.bufferSize = frameSize;
-    const det = PitchDetector.forFloat32Array(frameSize);
     const ch = full.getChannelData(0);
 
+    // ── Meyda pass (always) — RMS + spectral centroid per frame ──────────────
     const rawRms: number[] = [];
-    const rawC: number[] = [];
-    const rawP: number[] = [];
+    const rawC:   number[] = [];
+    const times:  number[] = [];
+
+    // pitchy detector: only instantiated when needed
+    const det = pitchDetector === 'pitchy' ? PitchDetector.forFloat32Array(frameSize) : null;
+    const rawP:  number[] = [];
     const confs: number[] = [];
-    const times: number[] = [];
 
     for (let i = 0; i < ch.length - frameSize; i += hopSize) {
       const frame = ch.slice(i, i + frameSize);
@@ -335,9 +369,11 @@ export async function analyzeAudioUrl(
       times.push(i / sr);
       rawRms.push(f.rms || 0);
       rawC.push(f.spectralCentroid || 0);
-      const [freq, cl] = det.findPitch(frame, sr);
-      rawP.push(freq && cl > 0 ? 69 + 12 * Math.log2(freq / 440) : 0);
-      confs.push(cl);
+      if (det) {
+        const [freq, cl] = det.findPitch(frame, sr);
+        rawP.push(freq && cl > 0 ? 69 + 12 * Math.log2(freq / 440) : 0);
+        confs.push(cl);
+      }
       if (rawRms.length % 50 === 0) await new Promise(r => setTimeout(r, 0));
       if (isCancelled()) return;
     }
@@ -345,6 +381,58 @@ export async function analyzeAudioUrl(
     const nRms = normalizeFeatureArr(rawRms);
     const nC   = normalizeFeatureArr(rawC);
 
+    // ── basic-pitch branch ────────────────────────────────────────────────────
+    if (pitchDetector === 'basic-pitch') {
+      const mono22k = await resampleTo22050(full);
+      if (isCancelled()) return;
+
+      const bp = await getBasicPitch();
+      if (isCancelled()) return;
+
+      const allFrames: number[][] = [];
+      const allOnsets: number[][] = [];
+      await bp.evaluateModel(
+        mono22k,
+        (f: number[][], o: number[][], _c: number[][]) => { allFrames.push(...f); allOnsets.push(...o); },
+        (_p: number) => {},
+      );
+      if (isCancelled()) return;
+
+      const { outputToNotesPoly, noteFramesToTime } = await import('@spotify/basic-pitch');
+      const notes = noteFramesToTime(outputToNotesPoly(allFrames, allOnsets));
+
+      const { extractMelodyNotes_salience, midiNoteLabel } =
+        await import('./melodicAnalysis');
+      const { melody, harmony } = extractMelodyNotes_salience(notes);
+
+      const hopSec = hopSize / sr;
+
+      const toFeature = (note: typeof notes[0], isMelody: boolean): FrameFeatures | null => {
+        const fi = Math.min(Math.round(note.startTimeSeconds / hopSec), rawRms.length - 1);
+        if ((rawRms[fi] ?? 0) < minRms) return null;
+        return {
+          time:       note.startTimeSeconds,
+          duration:   note.durationSeconds,
+          pitch:      note.pitchMidi,
+          pitchConf:  note.amplitude,
+          rms:        nRms[fi] ?? 0,
+          centroid:   nC[fi]  ?? 0,
+          isMelody,
+          pitchLabel: isMelody ? midiNoteLabel(note.pitchMidi) : undefined,
+        };
+      };
+
+      const feats_bp: FrameFeatures[] = [
+        ...melody.map(n => toFeature(n, true)),
+        ...harmony.map(n => toFeature(n, false)),
+      ].filter((f): f is FrameFeatures => f !== null);
+
+
+      if (!isCancelled()) onDone(feats_bp, full.duration);
+      return;
+    }
+
+    // ── pitchy branch (original) ──────────────────────────────────────────────
     const avgOf = (arr: number[]) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0;
 
     const feats: FrameFeatures[] = [];
@@ -356,12 +444,12 @@ export async function analyzeAudioUrl(
       if (end) {
         if (avgOf(rawRms.slice(si, i + 1)) >= minRms) {
           feats.push({
-            time:     times[si],
-            duration: times[i] - times[si],
-            pitch:    medianPitch(rawP.slice(si, i + 1)),
+            time:      times[si],
+            duration:  times[i] - times[si],
+            pitch:     medianPitch(rawP.slice(si, i + 1)),
             pitchConf: confs[si],
-            rms:      avgOf(nRms.slice(si, i + 1)),
-            centroid: avgOf(nC.slice(si, i + 1)),
+            rms:       avgOf(nRms.slice(si, i + 1)),
+            centroid:  avgOf(nC.slice(si, i + 1)),
           });
         }
         si = p > 0 ? i : -1;
@@ -375,12 +463,12 @@ export async function analyzeAudioUrl(
         if ((rawRms[i] ?? 0) < minRms) continue;
         const r = nRms[i] ?? 0, c = nC[i] ?? 0, p = rawP[i] ?? 0;
         feats.push({
-          time:     times[i],
-          duration: Math.max(fd * 8, 0.06),
-          pitch:    p > 0 ? p : 48 + c * 24,
+          time:      times[i],
+          duration:  Math.max(fd * 8, 0.06),
+          pitch:     p > 0 ? p : 48 + c * 24,
           pitchConf: confs[i] ?? 0,
-          rms:      r,
-          centroid: c,
+          rms:       r,
+          centroid:  c,
         });
       }
     }

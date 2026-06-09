@@ -6,6 +6,7 @@
 import { useRef, useState, useCallback, useEffect } from 'react';
 import {
   type FrameFeatures,
+  type PitchDetectorType,
   mapPitch,
   drawFeatureNote,
   analyzeAudioUrl,
@@ -39,8 +40,10 @@ const DEFAULT_OUTPUT_URL = '/data/compare2_hp.wav';
 
 const RING_COLOR   = '#7B8FFF';
 const RING_LABEL   = 'output stem';
-const PUFF_SPAWN_MS = 1300;
-const PUFF_HIT_PX   = 60;
+const PUFF_SPAWN_MS    = 1300;
+const PUFF_HIT_PX      = 60;
+const PUFF_FADE_DELAY_S = 2.0;
+const PUFF_FADE_DUR_S   = 1.5;
 
 // ─── Drawing helpers ──────────────────────────────────────────────────────────
 
@@ -53,11 +56,12 @@ function drawSpanningPuff(
   anchor:    { x: number; y: number },
   match: SimilarityMatch,
   now: number,
+  fadeAlpha: number,
 ) {
   const [r, g, b] = match.rgb;
   const pulse    = 1 + Math.sin(now * 0.002) * 0.12;
   const n        = Math.max(1, positions.length);
-  const strength = 0.28 / Math.sqrt(n);
+  const strength = 0.28 / Math.sqrt(n) * fadeAlpha;
   const radius   = 22 * pulse;
 
   ctx.globalCompositeOperation = 'screen';
@@ -72,7 +76,7 @@ function drawSpanningPuff(
   }
   ctx.globalCompositeOperation = 'source-over';
 
-  ctx.globalAlpha = 0.65;
+  ctx.globalAlpha = 0.65 * fadeAlpha;
   ctx.fillStyle   = `rgb(${r},${g},${b})`;
   ctx.font        = '11px Inter, sans-serif';
   ctx.textAlign   = 'center'; ctx.textBaseline = 'top';
@@ -116,9 +120,11 @@ export default function ComparisonPage() {
   const [outputUrl,      setOutputUrl]      = useState<string | null>(DEFAULT_OUTPUT_URL);
   const [inputFileName,  setInputFileName]  = useState('input.wav');
   const [outputFileName, setOutputFileName] = useState('output.wav');
-  const [phase,          setPhase]          = useState<Phase>('idle');
-  const [selectedMatch,  setSelectedMatch]  = useState<SimilarityMatch | null>(null);
-  const [playingSnippet, setPlayingSnippet] = useState<'input' | 'output' | null>(null);
+  const [phase,           setPhase]          = useState<Phase>('idle');
+  const [selectedMatch,   setSelectedMatch]  = useState<SimilarityMatch | null>(null);
+  const [playingSnippet,  setPlayingSnippet] = useState<'input' | 'output' | null>(null);
+  const [pitchDetector,   setPitchDetector]  = useState<PitchDetectorType>('pitchy');
+  const [isAnalyzing,     setIsAnalyzing]    = useState(false);
 
   // Output player state
   const [outTime,    setOutTime]    = useState(0);
@@ -126,9 +132,10 @@ export default function ComparisonPage() {
   const [outPlaying, setOutPlaying] = useState(false);
 
   // RAF-accessible refs
-  const outputFeaturesRef = useRef<FrameFeatures[]>([]);
-  const outputDurRef      = useRef(0);
-  const pitchMedianRef    = useRef(0.5);
+  const pendingPlayRef     = useRef(false);
+  const outputFeaturesRef  = useRef<FrameFeatures[]>([]);
+  const outputDurRef       = useRef(0);
+  const pitchMedianRef     = useRef(0.5);
   const matchStatesRef    = useRef<MatchState[]>(SIMILARITY_MATCHES.map(() => null));
   const puffHitRef        = useRef<Array<{ anchor: {x:number;y:number}; windowPos: {x:number;y:number}[]; match: SimilarityMatch }>>([]);
   const selectedMatchRef  = useRef<SimilarityMatch | null>(null);
@@ -164,7 +171,7 @@ export default function ComparisonPage() {
   }, []);
 
   // ── Output analysis (shared by file drop and default URL) ────────────────
-  const loadOutputUrl = useCallback((url: string, name: string) => {
+  const loadOutputUrl = useCallback((url: string, name: string, detector: PitchDetectorType) => {
     setOutputFileName(name);
     setOutputUrl(prev => { if (prev?.startsWith('blob:')) URL.revokeObjectURL(prev); return url; });
     outputFeaturesRef.current = [];
@@ -172,6 +179,7 @@ export default function ComparisonPage() {
     pitchMedianRef.current    = 0.5;
     matchStatesRef.current    = SIMILARITY_MATCHES.map(() => null);
     puffHitRef.current        = [];
+    if (detector === 'basic-pitch') setIsAnalyzing(true);
     let cancelled = false;
     void analyzeAudioUrl(
       url,
@@ -181,15 +189,23 @@ export default function ComparisonPage() {
         outputDurRef.current      = dur;
         const pitches = feats.map(f => mapPitch(f.pitch)).filter(p => p > 0).sort((a, b) => a - b);
         pitchMedianRef.current = pitches.length ? pitches[Math.floor(pitches.length / 2)] : 0.5;
+        setIsAnalyzing(false);
+        if (pendingPlayRef.current) {
+          pendingPlayRef.current = false;
+          const el = outputAudioRef.current;
+          if (el) { el.currentTime = 0; void el.play(); }
+        }
       },
       () => cancelled,
+      0.01,
+      detector,
     );
-    return () => { cancelled = true; };
+    return () => { cancelled = true; setIsAnalyzing(false); };
   }, []);
 
   // ── Load defaults on mount ────────────────────────────────────────────────
   useEffect(() => {
-    loadOutputUrl(DEFAULT_OUTPUT_URL, 'compare2.wav');
+    loadOutputUrl(DEFAULT_OUTPUT_URL, 'compare2.wav', 'pitchy');
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -202,8 +218,8 @@ export default function ComparisonPage() {
 
   const handleOutputFile = useCallback((file: File) => {
     const url = URL.createObjectURL(file);
-    loadOutputUrl(url, file.name);
-  }, [loadOutputUrl]);
+    loadOutputUrl(url, file.name, pitchDetector);
+  }, [loadOutputUrl, pitchDetector]);
 
   // ── Phase control ──────────────────────────────────────────────────────────
   const handleStart = useCallback(() => {
@@ -212,11 +228,18 @@ export default function ComparisonPage() {
     puffHitRef.current     = [];
     setSelectedMatch(null); setPlayingSnippet(null);
     setPhase('ready');
-    const el = outputAudioRef.current;
-    if (el) { el.currentTime = 0; void el.play(); }
+    if (outputFeaturesRef.current.length > 0) {
+      // Analysis already done — play immediately
+      const el = outputAudioRef.current;
+      if (el) { el.currentTime = 0; void el.play(); }
+    } else {
+      // Analysis still running — defer playback until onDone fires
+      pendingPlayRef.current = true;
+    }
   }, [outputUrl]);
 
   const handleReset = useCallback(() => {
+    pendingPlayRef.current = false;
     outputAudioRef.current?.pause();
     inputAudioRef.current?.pause();
     matchStatesRef.current = SIMILARITY_MATCHES.map(() => null);
@@ -315,21 +338,61 @@ export default function ComparisonPage() {
           }
           ctx.globalAlpha = 1;
         } else {
+          const fadeAlpha = outT > match.outputEnd + PUFF_FADE_DELAY_S
+            ? Math.max(0, 1 - (outT - match.outputEnd - PUFF_FADE_DELAY_S) / PUFF_FADE_DUR_S)
+            : 1;
+          if (fadeAlpha <= 0) return;
           const windowPositions = state.windowIndices.map(fi => {
             const f = feats[fi];
             return f ? featOrbitalPos(f, outT, median, ringR, bandH, cx, cy, orbitDur) : anchor;
           });
-          drawSpanningPuff(ctx, windowPositions, anchor, match, now);
+          drawSpanningPuff(ctx, windowPositions, anchor, match, now, fadeAlpha);
           newHits.push({ anchor, windowPos: windowPositions, match });
         }
       });
       puffHitRef.current = newHits;
 
-      // ── Stars on ring ───────────────────────────────────────────────────────
+      // ── Stars on ring ────────────────────────────────────────────────────────
+      // Age-fade constants: start fading at 2 orbits, fully gone by 3 orbits.
+      // The 1-orbit fade window prevents the abrupt-disappearance artifact.
+      const AGE_FADE_START  = 2;
+      const AGE_FADE_WINDOW = 1;
+
       for (const feat of feats) {
-        const orbR  = ringR + (mapPitch(feat.pitch) - median) * bandH * 2;
-        const color = stemGalaxyColor('other', feat.rms, feat.centroid);
-        drawFeatureNote(ctx, feat, outT, cx, cy, baseR, orbitDur, 1.0, orbR, color);
+        // Smooth age-based fade — events older than 2 orbital cycles fade out
+        // gradually over the next full cycle so there's no sudden pop.
+        const ageOrbits = (outT - feat.time) / orbitDur;
+        if (ageOrbits >= AGE_FADE_START + AGE_FADE_WINDOW) continue;
+        const ageAlpha = ageOrbits < AGE_FADE_START ? 1
+          : 1 - (ageOrbits - AGE_FADE_START) / AGE_FADE_WINDOW;
+
+        const isHarmony = feat.isMelody === false;
+
+        // Melody notes spread wider radially; harmony compressed to a tighter band
+        const spread = isHarmony ? 1.2 : 3.5;
+        const orbR   = ringR + (mapPitch(feat.pitch) - median) * bandH * spread;
+        const color  = stemGalaxyColor('other', feat.rms, feat.centroid);
+        const alpha  = isHarmony ? 0.18 : 1.0;
+        const sizeScale = isHarmony ? 0.35 : 1.0;
+
+        drawFeatureNote(ctx, feat, outT, cx, cy, baseR, orbitDur,
+          alpha * ageAlpha, orbR, color, sizeScale);
+
+        // Pitch label: salient melody only, full opacity, only while note is sounding
+        if (!isHarmony && feat.pitchLabel) {
+          const dt = outT - feat.time;
+          if (dt >= 0 && dt <= feat.duration) {
+            const pos = featOrbitalPos(feat, outT, median, ringR, bandH, cx, cy, orbitDur);
+            ctx.save();
+            ctx.globalAlpha  = 1;
+            ctx.font         = 'bold 9px Inter, sans-serif';
+            ctx.fillStyle    = '#fff';
+            ctx.textAlign    = 'center';
+            ctx.textBaseline = 'bottom';
+            ctx.fillText(feat.pitchLabel, pos.x, pos.y - 8);
+            ctx.restore();
+          }
+        }
       }
 
       ctx.globalAlpha = 1;
@@ -477,8 +540,25 @@ export default function ComparisonPage() {
         ) : (
           <button style={{ ...s.btn, ...s.btnGhost }} onClick={handleReset}>Reset</button>
         )}
+
+        {/* Pitch detector toggle */}
+        <div style={s.toggle}>
+          {(['pitchy', 'basic-pitch'] as PitchDetectorType[]).map(d => (
+            <button
+              key={d}
+              style={{ ...s.toggleBtn, ...(pitchDetector === d ? s.toggleBtnActive : {}) }}
+              onClick={() => {
+                setPitchDetector(d);
+                if (outputUrl) loadOutputUrl(outputUrl, outputFileName, d);
+              }}
+            >
+              {d}
+            </button>
+          ))}
+        </div>
+
         <span style={s.statusText}>
-          {phase === 'idle' && !outputFileName && 'Upload the separated output stem to begin'}
+          {phase === 'idle' && !outputFileName && 'Upload audio to begin'}
           {phase === 'idle' &&  outputFileName && 'Click Analyze to start'}
           {phase === 'ready' && !selectedMatch && 'Click a glowing puff to inspect the matching segment'}
         </span>
@@ -492,6 +572,11 @@ export default function ComparisonPage() {
           onClick={handleCanvasClick}
           onMouseMove={handleCanvasMouseMove}
         />
+        {isAnalyzing && (
+          <div style={s.loadingOverlay}>
+            <span style={s.loadingText}>Analyzing with basic-pitch…</span>
+          </div>
+        )}
         {selectedMatch && (
           <SnippetPanel
             match={selectedMatch}
@@ -653,4 +738,11 @@ const s: Record<string, React.CSSProperties> = {
   trackThumb:  { position: 'absolute', top: '50%', transform: 'translate(-50%,-50%)', width: '12px', height: '12px', background: '#fff', borderRadius: '50%', pointerEvents: 'none', boxShadow: '0 0 4px rgba(0,0,0,0.4)' },
 
   playerTime:  { fontSize: '11px', color: 'rgba(255,255,255,0.35)', flexShrink: 0, fontVariantNumeric: 'tabular-nums' },
+
+  loadingOverlay: { position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' },
+  loadingText:    { fontSize: '13px', color: 'rgba(255,255,255,0.4)', fontFamily: 'Inter, sans-serif', letterSpacing: '0.03em' },
+
+  toggle:         { display: 'flex', borderRadius: '6px', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.12)', flexShrink: 0 },
+  toggleBtn:      { background: 'transparent', border: 'none', color: 'rgba(255,255,255,0.35)', cursor: 'pointer', fontFamily: 'inherit', fontSize: '12px', padding: '5px 12px', transition: 'background 0.15s, color 0.15s' },
+  toggleBtnActive:{ background: 'rgba(123,143,255,0.18)', color: '#7B8FFF' },
 };
