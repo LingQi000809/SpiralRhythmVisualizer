@@ -32,7 +32,7 @@ export interface InputData {
 // ANALYSIS
 // ========
 
-const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"] as const;
+export const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"] as const;
 
 const CHORD_TEMPLATES: Record<string, number[]> = {
   maj: [0, 4, 7],
@@ -240,7 +240,6 @@ const FIFTH_HUE = [
   52,  // A#  yellow (soft but visible)
   190  // B   cyan-teal (bright return anchor)
 ];
-const NOTE_NAMES_PC = ["C","C#","D","D#","E","F","F#","G","G#","A","A#","B"];
 
 const PUFF_LIFETIME = 6000;   // ms before a puff is removed
 const PUFF_FADE_START = 0.45; // fraction of lifetime at which fade begins
@@ -248,7 +247,7 @@ const PUFF_FADE_START = 0.45; // fraction of lifetime at which fade begins
 export function chordRootHue(chord: string): number {
   if (!chord || chord === "N") return 200;
   // Match longest note name first to avoid "C#" being parsed as "C"
-  const pc = NOTE_NAMES_PC.findIndex(n => chord.startsWith(n));
+  const pc = NOTE_NAMES.findIndex(n => chord.startsWith(n));
   return pc >= 0 ? FIFTH_HUE[pc] : 200;
 }
 
@@ -318,4 +317,111 @@ export function drawNebulaLayer(
     }
   }
   ctx.globalCompositeOperation = 'source-over';
+}
+
+// ==========================
+// MIDI Galaxy Color
+// ==========================
+
+function clamp01(x: number): number { return Math.max(0, Math.min(1, x)); }
+function pitchHash(pitch: number): number {
+  const x = Math.sin(pitch * 12.9898) * 43758.5453;
+  return (x - Math.floor(x)) * 2 - 1;
+}
+
+function chordColor(drift: number, jitter: number, light: number, v: number): string {
+  const baseHue = 235;
+  const hue = baseHue + drift + jitter * 10;
+  const sat = 55 + v * 20;
+  const alpha = 0.3 + v * 0.2;
+  return `hsla(${hue}, ${sat}%, ${light}%, ${alpha})`;
+}
+
+function nonChordColor(drift: number, jitter: number, light: number, v: number): string {
+  const baseHue = 350;
+  const hue = baseHue + drift - jitter * 12;
+  const sat = 50 + v * 15;
+  const alpha = 0.3 + v * 0.2;
+  return `hsla(${hue}, ${sat}%, ${light - 3}%, ${alpha})`;
+}
+
+export function getMidiGalaxyColor(
+  pitch: number, velocity: number, time: number, isChordTone: boolean
+): string {
+  const v = clamp01(velocity / 127);
+  const drift = Math.sin(time * 0.08 + pitch * 0.03) * 5;
+  const jitter = pitchHash(pitch);
+  const light = 38 + v * 32;
+  return isChordTone
+    ? chordColor(drift, jitter, light, v)
+    : nonChordColor(drift, jitter, light, v);
+}
+
+// ==========================
+// Circle of Fifths / Harmony
+// ==========================
+
+export const CIRCLE_OF_FIFTHS_ORDER = ['C', 'G', 'D', 'A', 'E', 'B', 'F#', 'C#', 'G#', 'D#', 'A#', 'F'];
+
+export const COF_HUES: Record<string, number> = {};
+CIRCLE_OF_FIFTHS_ORDER.forEach((note, i) => { COF_HUES[note] = i * 30; });
+
+export const CHORD_INTERVALS: Record<string, number[]> = {
+  'maj': [0, 4, 7], 'min': [0, 3, 7], 'dim': [0, 3, 6], 'aug': [0, 4, 8],
+  'dom7': [0, 4, 7, 10], 'maj7': [0, 4, 7, 11], 'min7': [0, 3, 7, 10],
+  '7': [0, 4, 7, 10], 'sus4': [0, 5, 7], 'sus2': [0, 2, 7],
+  'min7b5': [0, 3, 6, 10], 'dim7': [0, 3, 6, 9],
+};
+
+export const CHORD_DISSONANCE: Record<string, number> = {
+  'maj': 0.1, 'min': 0.15, 'sus4': 0.2, 'sus2': 0.2,
+  'maj7': 0.35, 'dom7': 0.4, '7': 0.4, 'min7': 0.45,
+  'aug': 0.6, 'dim': 0.65, 'min7b5': 0.75, 'dim7': 0.85,
+};
+
+export interface ParsedChord {
+  root: string;
+  rootIdx: number;
+  type: string;
+  intervals: number[];
+  pitchClasses: number[];
+}
+
+export function parseChordName(name: string): ParsedChord | null {
+  if (!name || name === 'N') return null;
+  let root: string, type: string;
+  if (name.length > 1 && name[1] === '#') {
+    root = name.substring(0, 2);
+    type = name.substring(2);
+  } else {
+    root = name.substring(0, 1);
+    type = name.substring(1);
+  }
+  if (!type) type = 'maj';
+  const rootIdx = NOTE_NAMES.indexOf(root as typeof NOTE_NAMES[number]);
+  if (rootIdx < 0) return null;
+  const intervals = CHORD_INTERVALS[type] || CHORD_INTERVALS['maj'];
+  const pitchClasses = intervals.map(iv => (rootIdx + iv) % 12);
+  return { root, rootIdx, type, intervals, pitchClasses };
+}
+
+export interface ChordSegment {
+  chord: string;
+  start: number;
+  end: number;
+  confidence: number;
+  dissonance: number;
+  tension?: number;
+}
+
+export function lookupChord(chords: ChordSegment[], time: number): ChordSegment | null {
+  if (!chords || chords.length === 0) return null;
+  let lo = 0, hi = chords.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (time < chords[mid].start) hi = mid - 1;
+    else if (time >= chords[mid].end) lo = mid + 1;
+    else return chords[mid];
+  }
+  return null;
 }

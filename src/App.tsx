@@ -7,7 +7,7 @@ import ComparisonPage from './pages/ComparisonPage';
 type ActiveTab = 'main' | 'similarity';
 
 function TabShell() {
-  const [tab, setTab] = useState<ActiveTab>('main');
+  const [tab, setTab] = useState<ActiveTab>('similarity');
   return (
     <div style={{ display: 'flex', flexDirection: 'column', width: '100vw', height: '100vh', background: '#0b0e14', color: '#fff', fontFamily: 'Inter, sans-serif', boxSizing: 'border-box', overflow: 'hidden' }}>
       <div style={{ display: 'flex', gap: 2, padding: '8px 16px 0', flexShrink: 0, borderBottom: '1px solid rgba(255,255,255,0.07)' }}>

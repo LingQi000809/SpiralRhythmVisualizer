@@ -7,7 +7,7 @@
 //   1. Copy this file to Hearmi-Frontend/app/studio/components/
 //   2. Change imports of processVisualization/toVisualizationCacheData
 //      to use ../../utils/api (production URL already set there).
-//   3. Redirect stemVizHelpers / visDrawHelpers / visMidiHelpers imports
+//   3. Redirect visAudioHelpers / visMidiHelpers imports
 //      to ../utils/.
 //   4. The suck-in transition + audio routing lives in the parent
 //      (OutputPanel in production); this component is view-only.
@@ -19,7 +19,14 @@ import {
   mapPitch,
   drawFeatureNote,
   analyzeAudioUrl,
-} from '../utils/visDrawHelpers';
+  STEM_HEX,
+  DEFAULT_STEM_ORDER,
+  ringCenterRadius,
+  ringBandHalf,
+  drawOrbitRing,
+  drawStemLabel,
+  stemGalaxyColor,
+} from '../utils/visAudioHelpers';
 import type { NebulaPuff } from '../utils/visMidiHelpers';
 import { drawNebulaLayer } from '../utils/visMidiHelpers';
 import {
@@ -59,16 +66,6 @@ const processVisualizationForAudioUrl = async (audioUrl: string): Promise<Visual
   try { return await processPromise; }
   finally { visualizationProcessingByAudioUrl.delete(audioUrl); }
 };
-
-import {
-  STEM_HEX,
-  DEFAULT_STEM_ORDER,
-  ringCenterRadius,
-  ringBandHalf,
-  drawOrbitRing,
-  drawStemLabel,
-  stemGalaxyColor,
-} from '../utils/stemVizHelpers';
 
 // ── Props ──────────────────────────────────────────────────────────────────────
 
