@@ -124,6 +124,61 @@ export const toVisualizationCacheData = (data: VisualizationData): Visualization
 
 // ── API call (identical to production) ───────────────────────────────────────
 
+// ── Similarity detection (streaming SSE) ─────────────────────────────────────
+
+export interface BackendSimilarityMatch {
+  input_start:  number;
+  input_end:    number;
+  output_start: number;
+  output_end:   number;
+  similarity:   number;
+  // Visualization data from backend
+  in_note_times:    number[];
+  in_note_pitches:  number[];
+  out_note_times:   number[];
+  out_note_pitches: number[];
+  in_match_slice:   [number, number];
+  out_match_slice:  [number, number];
+  dtw_path:         [number, number][];
+}
+
+/**
+ * POST both audio files to /similarity and stream progress events back.
+ * Resolves with the list of matches when the backend signals "done".
+ */
+export async function streamSimilarity(
+  inputFile:  Blob,
+  outputFile: Blob,
+  onProgress: (msg: string) => void,
+): Promise<BackendSimilarityMatch[]> {
+  const form = new FormData();
+  form.append('input_audio',  inputFile,  'input.wav');
+  form.append('output_audio', outputFile, 'output.wav');
+
+  const response = await fetch(`${API_BASE_URL}/similarity`, { method: 'POST', body: form });
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+  const reader  = response.body!.getReader();
+  const decoder = new TextDecoder();
+  let   buffer  = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() ?? '';
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const event = JSON.parse(line.slice(6)) as { type: string; msg?: string; matches?: BackendSimilarityMatch[] };
+      if (event.type === 'progress' && event.msg) onProgress(event.msg);
+      if (event.type === 'done')   return event.matches ?? [];
+      if (event.type === 'error')  throw new Error(event.msg ?? 'Unknown error');
+    }
+  }
+  return [];
+}
+
 export async function processVisualization(
   audioFile: File
 ): Promise<ProcessVisualizationResponse> {

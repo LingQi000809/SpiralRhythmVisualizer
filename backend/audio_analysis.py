@@ -1,6 +1,13 @@
 from fastapi import FastAPI, File, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+
+import asyncio
+import dataclasses
+import json
+import os
+import sys
+import threading
 
 import numpy as np
 import librosa
@@ -342,3 +349,109 @@ async def process_visualization(audio: UploadFile = File(...)):
     except Exception as e:
         print(f"[/process] error: {e}")
         return JSONResponse(status_code=400, content={"error": str(e)})
+
+
+# ── /similarity ───────────────────────────────────────────────────────────────
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+
+import time as _time
+from melody_similarity import (  # noqa: E402
+    find_similarity_matches, extract_notes, _flatten_polyphony, dump_debug_json,
+)
+
+_DEBUG_DIR = os.path.join(_HERE, "debug")
+os.makedirs(_DEBUG_DIR, exist_ok=True)
+
+@app.post("/similarity")
+async def similarity_detection(
+    input_audio:  UploadFile = File(...),
+    output_audio: UploadFile = File(...),
+):
+    """
+    Accepts two audio files, runs find_similarity_matches, and streams progress
+    back as Server-Sent Events.
+
+    Event shapes:
+      {"type": "progress", "msg": "..."}   — one log line
+      {"type": "done",     "matches": [...]}  — final result
+      {"type": "error",    "msg": "..."}   — on exception
+    """
+    in_filename  = input_audio.filename  or "input.wav"
+    out_filename = output_audio.filename or "output.wav"
+
+    in_bytes  = await input_audio.read()
+    out_bytes = await output_audio.read()
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+        f.write(in_bytes);  in_path = f.name
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+        f.write(out_bytes); out_path = f.name
+
+    queue: asyncio.Queue = asyncio.Queue()
+    loop = asyncio.get_event_loop()
+
+    def _cb(msg: str) -> None:
+        asyncio.run_coroutine_threadsafe(queue.put({"type": "progress", "msg": msg}), loop)
+
+    def _run() -> None:
+        try:
+            # Extract notes once — reused by find_similarity_matches and debug JSON
+            t0 = _time.perf_counter()
+            raw_in  = extract_notes(in_path)
+            raw_out = extract_notes(out_path)
+            flat_in  = _flatten_polyphony(raw_in)
+            flat_out = _flatten_polyphony(raw_out)
+            t_extract = _time.perf_counter() - t0
+
+            t1 = _time.perf_counter()
+            matches = find_similarity_matches(
+                in_path, out_path,
+                K=5, min_similarity=0.6, polyphony="weighted",
+                debug=False, progress_callback=_cb,
+                raw_notes_in=raw_in, raw_notes_out=raw_out,
+            )
+            t_match = _time.perf_counter() - t1
+
+            # Save debug JSON
+            from datetime import datetime as _dt
+            stamp      = _dt.now().strftime("%Y%m%d_%H%M%S")
+            debug_path = os.path.join(_DEBUG_DIR, f"debug_{stamp}.json")
+            dump_debug_json(
+                debug_path,
+                raw_in=raw_in,   raw_out=raw_out,
+                flat_in=flat_in, flat_out=flat_out,
+                matches=matches,
+                input_audio=in_filename,
+                output_audio=out_filename,
+                latency={
+                    "extract_notes_s":           t_extract,
+                    "find_similarity_matches_s":  t_match,
+                    "total_s":                   t_extract + t_match,
+                },
+            )
+
+            payload = [dataclasses.asdict(m) for m in matches]
+            asyncio.run_coroutine_threadsafe(queue.put({"type": "done", "matches": payload}), loop)
+        except Exception as exc:
+            asyncio.run_coroutine_threadsafe(queue.put({"type": "error", "msg": str(exc)}), loop)
+        finally:
+            os.unlink(in_path)
+            os.unlink(out_path)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+    async def _generate():
+        while True:
+            event = await queue.get()
+            yield f"data: {json.dumps(event)}\n\n"
+            if event["type"] in ("done", "error"):
+                break
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

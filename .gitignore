@@ -27,3 +27,5 @@ venv*
 tfjs_env
 __pycache__
 *.ckpt
+
+debug/
